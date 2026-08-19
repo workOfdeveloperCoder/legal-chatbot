@@ -198,6 +198,37 @@ class Settings(BaseSettings):
 
     LLM_ENABLE_STREAMING: bool = False
 
+    # Local Voice Mode (no cloud STT/TTS, no API keys).
+    STT_ENGINE: str = "auto"
+
+    STT_MODEL: str = "base"
+
+    STT_DEVICE: str = "cpu"
+
+    STT_COMPUTE_TYPE: str = "int8"
+
+    STT_MODEL_CACHE: str = "models/voice/whisper"
+
+    STT_WHISPER_CPP_BIN: str | None = None
+
+    STT_WHISPER_CPP_MODEL: str | None = None
+
+    STT_MAX_AUDIO_BYTES: int = 8_000_000
+
+    STT_MAX_SECONDS: int = 45
+
+    TTS_ENGINE: str = "auto"
+
+    TTS_PIPER_BIN: str | None = None
+
+    TTS_VOICE_EN: str = "models/voice/en_US-lessac-medium.onnx"
+
+    TTS_VOICE_UR: str | None = None
+
+    TTS_VOICE_PA: str | None = None
+
+    TTS_ESPEAK_BIN: str = "espeak-ng"
+
     PROMPT_VERSION: str = "legal-v3"
 
     RETRIEVAL_VERSION: str = "tiered-v2"

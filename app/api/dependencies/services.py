@@ -39,6 +39,7 @@ from app.services.memory_service import MemoryService
 from app.services.prompt_context_service import PromptContextService
 from app.services.query_router import QueryRouter
 from app.services.response_formatter import ResponseFormatter
+from app.services.voice_service import VoiceService
 from app.vector.service import VectorService
 
 
@@ -218,6 +219,14 @@ def get_rag_service(
         answer_guard=AnswerGuard(),
         document_repository=DocumentRepository(db),
     )
+
+
+# ---------------------------------------------------------------------
+# Voice
+# ---------------------------------------------------------------------
+
+def get_voice_service() -> VoiceService:
+    return VoiceService()
 
 
 # ---------------------------------------------------------------------
