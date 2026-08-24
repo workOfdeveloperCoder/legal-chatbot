@@ -9,6 +9,7 @@ from app.api.v1.conversations import router as conversations_router
 from app.api.v1.documents import router as document_router
 from app.api.v1.logs import router as logs_router
 from app.api.v1.voice import router as voice_router
+from app.api.v1.llm import router as llm_router
 from app.core.config import settings
 from app.observability.exception_handlers import register_exception_handlers
 from app.observability.middleware import RequestLoggingMiddleware
@@ -64,6 +65,11 @@ app.include_router(
 
 app.include_router(
     voice_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    llm_router,
     prefix="/api/v1",
 )
 

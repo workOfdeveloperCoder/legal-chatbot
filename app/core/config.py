@@ -155,6 +155,21 @@ class Settings(BaseSettings):
     # ==================================================
     # AI / LLM
     # ==================================================
+    #
+    # Chat can be local (Ollama) or any hosted LLM.
+    # Canonical env names for hosted chat (any vendor):
+    #   LLM_PROVIDER   openai | gemini | anthropic | deepseek | groq | ...
+    #   CHAT_MODEL     vendor model id (defaults per provider if omitted)
+    #   LLM_API_KEY    one key for whatever LLM_PROVIDER is set to
+    #   LLM_URL        optional; hosted URL is used when this is still localhost
+    # Embeddings stay on local nomic so existing 768-d Qdrant collections
+    # keep working when chat is switched to a hosted LLM.
+    #
+    # Online example (Gemini, OpenAI, Claude — same key name):
+    #   LLM_PROVIDER=gemini
+    #   CHAT_MODEL=gemini-3.6-flash
+    #   LLM_API_KEY=...
+    #   LLM_TIMEOUT=120
 
     LLM_PROVIDER: str = "ollama"
 
@@ -169,6 +184,10 @@ class Settings(BaseSettings):
     )
 
 
+    EMBEDDING_PROVIDER: str = "ollama"
+
+    EMBEDDING_URL: str | None = None
+
     EMBEDDING_MODEL: str = (
         "nomic-embed-text:latest"
     )
@@ -180,7 +199,20 @@ class Settings(BaseSettings):
 
     LLM_CONNECT_TIMEOUT: int = 60
 
+    # Canonical key for ANY hosted chat LLM. Prefer this over vendor aliases.
     LLM_API_KEY: str | None = None
+
+    OPENAI_API_KEY: str | None = None
+
+    ANTHROPIC_API_KEY: str | None = None
+
+    GOOGLE_API_KEY: str | None = None
+
+    GEMINI_API_KEY: str | None = None
+
+    DEEPSEEK_API_KEY: str | None = None
+
+    GROQ_API_KEY: str | None = None
 
     LLM_MAX_RETRIES: int = 1
 
@@ -197,6 +229,9 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.1
 
     LLM_ENABLE_STREAMING: bool = False
+
+    # Hosted models do not need the local R1 two-stage path.
+    LLM_TWO_STAGE_ONLINE: bool = False
 
     # Local Voice Mode (no cloud STT/TTS, no API keys).
     STT_ENGINE: str = "auto"
@@ -286,6 +321,23 @@ class Settings(BaseSettings):
 
     TOKEN_COST_TRACKING_ENABLED: bool = True
 
+    TOKEN_USAGE_WARNING_PERCENT: float = 80.0
+
+    # Tighter packing when chat uses a hosted LLM (cost + focus).
+    TOKEN_ONLINE_RESERVED_OUTPUT: int = 1536
+
+    TOKEN_ONLINE_SAFETY_MARGIN: int = 256
+
+    TOKEN_ONLINE_SCAFFOLDING: int = 180
+
+    TOKEN_ONLINE_MAX_CONVERSATION_TOKENS: int = 1200
+
+    TOKEN_ONLINE_MAX_LEGAL_EVIDENCE_TOKENS: int = 3500
+
+    TOKEN_ONLINE_MAX_MATTER_EVIDENCE_TOKENS: int = 2500
+
+    TOKEN_ONLINE_MAX_CONVERSATION_DOCUMENT_TOKENS: int = 2000
+
 
 
     # ==================================================
@@ -299,6 +351,44 @@ class Settings(BaseSettings):
     LOG_BODY_MAX_BYTES: int = 16384
 
     LOG_SKIP_PATHS: str = "/docs,/openapi.json,/redoc"
+
+
+    @property
+    def resolved_llm_api_key(self) -> str | None:
+        from app.llm.provider_config import nonempty_secret
+
+        return nonempty_secret(self.LLM_API_KEY) or self.api_key_for_provider(
+            self.LLM_PROVIDER
+        )
+
+    def api_key_for_provider(self, provider: str | None) -> str | None:
+        from app.llm.provider_config import (
+            nonempty_secret,
+            provider_api_key_aliases,
+        )
+
+        canonical = nonempty_secret(self.LLM_API_KEY)
+        if canonical:
+            return canonical
+        for alias in provider_api_key_aliases(provider):
+            value = nonempty_secret(getattr(self, alias, None))
+            if value:
+                return value
+        return None
+
+    @property
+    def embedding_base_url(self) -> str:
+        if self.EMBEDDING_URL:
+            return self.EMBEDDING_URL.rstrip("/")
+        if (self.LLM_PROVIDER or "").lower() == "ollama":
+            return self.LLM_URL.rstrip("/")
+        return "http://localhost:11434"
+
+    @property
+    def is_online_llm(self) -> bool:
+        from app.llm.provider_config import is_online_provider
+
+        return is_online_provider(self.LLM_PROVIDER)
 
 
 

@@ -72,6 +72,7 @@ class TokenBudgetManager:
         conversation_summary: str | None = None,
         reserved_output_tokens: int | None = None,
         document_qa_mode: bool = False,
+        duplicate_system_in_user: bool = True,
     ) -> PackedContext:
         """
         Allocate available input tokens and pack context for the LLM call.
@@ -99,13 +100,15 @@ class TokenBudgetManager:
         query_tokens = self.counter.count(question)
         scaffolding = limits.scaffolding_overhead_tokens
 
-        # PromptBuilder also embeds LEGAL_SYSTEM_PROMPT in the user message.
-        # Reserve that duplication so the final prompt stays inside the window.
+        # PromptBuilder may also embed the system prompt in the user message.
+        # Skip that reservation when the execution profile already sends it
+        # only as the system role (hosted models).
         prompt_system_dup = 0
-        if system_text.strip() == LEGAL_SYSTEM_PROMPT.strip():
-            prompt_system_dup = self.counter.count(LEGAL_SYSTEM_PROMPT)
-        elif system_prompt is None:
-            prompt_system_dup = self.counter.count(LEGAL_SYSTEM_PROMPT)
+        if duplicate_system_in_user:
+            if system_text.strip() == LEGAL_SYSTEM_PROMPT.strip():
+                prompt_system_dup = self.counter.count(LEGAL_SYSTEM_PROMPT)
+            elif system_prompt is None:
+                prompt_system_dup = self.counter.count(LEGAL_SYSTEM_PROMPT)
 
         fixed = system_tokens + prompt_system_dup + query_tokens + scaffolding
         remaining = available_input - fixed
@@ -332,8 +335,17 @@ class TokenBudgetManager:
         )
         trimming_reason = "; ".join(trim_reasons) if trim_reasons else None
 
+        remaining_input = max(0, available_input - input_tokens)
+        usage_percent = 0.0
+        if caps.context_window > 0:
+            usage_percent = round(
+                100.0 * (input_tokens + reserved) / caps.context_window,
+                2,
+            )
+
         metadata = TokenUsageMetadata(
             model=caps.model_name,
+            provider=caps.provider,
             context_window=caps.context_window,
             input_tokens=input_tokens,
             output_tokens=reserved,
@@ -348,6 +360,9 @@ class TokenBudgetManager:
             safety_margin_tokens=limits.safety_margin,
             scaffolding_tokens=scaffolding,
             available_input_tokens=available_input,
+            remaining_input_tokens=remaining_input,
+            usage_percent=usage_percent,
+            usage_source="estimate",
             estimated_cost=cost,
             budget_trimmed=budget_trimmed,
             trimming_reason=trimming_reason,
@@ -407,6 +422,14 @@ class TokenBudgetManager:
             if packed.metadata:
                 packed.metadata.input_tokens = total
                 packed.metadata.total_tokens = total + reserved
+                packed.metadata.remaining_input_tokens = max(0, available - total)
+                if self.capabilities.context_window > 0:
+                    packed.metadata.usage_percent = round(
+                        100.0
+                        * packed.metadata.total_tokens
+                        / self.capabilities.context_window,
+                        2,
+                    )
             return packed
 
         overflow = total - available
@@ -426,6 +449,17 @@ class TokenBudgetManager:
             packed.metadata.total_tokens = (
                 packed.metadata.input_tokens + reserved
             )
+            packed.metadata.remaining_input_tokens = max(
+                0,
+                available - packed.metadata.input_tokens,
+            )
+            if self.capabilities.context_window > 0:
+                packed.metadata.usage_percent = round(
+                    100.0
+                    * packed.metadata.total_tokens
+                    / self.capabilities.context_window,
+                    2,
+                )
         return packed
 
     def _drop_lowest_until(

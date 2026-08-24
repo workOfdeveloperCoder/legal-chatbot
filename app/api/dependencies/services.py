@@ -40,6 +40,7 @@ from app.services.prompt_context_service import PromptContextService
 from app.services.query_router import QueryRouter
 from app.services.response_formatter import ResponseFormatter
 from app.services.voice_service import VoiceService
+from app.services.token_usage_service import TokenUsageService
 from app.vector.service import VectorService
 
 
@@ -227,6 +228,12 @@ def get_rag_service(
 
 def get_voice_service() -> VoiceService:
     return VoiceService()
+
+
+def get_token_usage_service(
+    llm: BaseLLM = Depends(get_llm),
+) -> TokenUsageService:
+    return TokenUsageService(llm=llm)
 
 
 # ---------------------------------------------------------------------

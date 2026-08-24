@@ -31,9 +31,13 @@ class PromptBuilder:
         conversation_summary: str | None = None,
         active_legal_context: str | None = None,
         language: LanguageDetection | None = None,
+        include_system_in_user: bool = True,
+        compact: bool = False,
     ) -> str:
 
-        prompt_parts = [LEGAL_SYSTEM_PROMPT]
+        prompt_parts = []
+        if include_system_in_user:
+            prompt_parts.append(LEGAL_SYSTEM_PROMPT)
 
         if complexity is not None:
             prompt_parts.append(self._build_complexity_guidance(complexity))
@@ -159,7 +163,7 @@ A chunk mentioning a keyword alone is NOT sufficient for a multi-part legal test
                 )
             )
 
-        prompt_parts.append(self._build_answer_contract(question, complexity))
+        prompt_parts.append(self._build_answer_contract(question, complexity, compact=compact))
 
         return "\n\n".join(prompt_parts)
 
@@ -297,7 +301,60 @@ Do not fabricate translations of legal terminology.
         self,
         question: str,
         complexity: QueryComplexity | None,
+        compact: bool = False,
     ) -> str:
+        structure = ""
+        if complexity == QueryComplexity.COMPLEX:
+            structure = """
+Write a clear professional answer:
+1. Direct answer first.
+2. Explain the relevant position from the evidence.
+3. Apply the evidence to the issue; distinguish document claims from law.
+4. State limitations where evidence is incomplete or conflicting.
+
+Do not force rigid markdown section headings unless they improve clarity.
+"""
+        elif complexity == QueryComplexity.RESEARCH:
+            structure = """
+Lead with a direct answer, then explain the supporting evidence briefly.
+Keep the structure natural and professional.
+"""
+
+        brevity = ""
+        if compact:
+            brevity = """
+Be token-efficient: default to 1–3 short paragraphs. No preamble, no
+restating the question, no heading template unless the question is complex.
+"""
+
+        return f"""
+USER QUESTION:
+
+{question}
+
+Provide a professional legal research answer grounded ONLY in the retrieved
+evidence above. Reason over the evidence — do not merely restate it.
+{structure}{brevity}
+Attribution language (use precisely):
+- Statute/law: "The statute provides...", "Section X states..."
+- Judgment: "The court held...", "The judgment established..."
+- Uploaded document/article: "The article argues...", "According to the
+  uploaded document...", "The author contends..."
+- Analysis: "This suggests...", "On the available evidence..."
+- Never present an author's argument or secondary material as binding law.
+
+Rules:
+- Follow the RESPONSE LANGUAGE instruction above when present.
+- Cite sources using [Source N] matching the numbered blocks.
+- Do not include a separate Sources, References, or Citations section.
+- Distinguish legal authority from matter/conversation documents.
+- Do not invent statutes, sections, cases, citations, or quotes.
+- If evidence is insufficient, say clearly:
+  "I don't have enough reliable evidence in the available sources to
+  answer that conclusively."
+- Be concise for simple questions; provide detail only when required.
+- Return ONLY the final answer — no chain-of-thought or internal analysis.
+"""
         structure = ""
         if complexity == QueryComplexity.COMPLEX:
             structure = """

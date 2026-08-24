@@ -49,10 +49,15 @@ class TokenUsageMetadata:
     chunks_retained: int = 0
     chunks_dropped: int = 0
     duplicates_removed: int = 0
+    remaining_input_tokens: int = 0
+    usage_percent: float = 0.0
+    usage_source: str = "estimate"
+    provider: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
             "model": self.model,
+            "provider": self.provider,
             "context_window": self.context_window,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -67,6 +72,9 @@ class TokenUsageMetadata:
             "safety_margin_tokens": self.safety_margin_tokens,
             "scaffolding_tokens": self.scaffolding_tokens,
             "available_input_tokens": self.available_input_tokens,
+            "remaining_input_tokens": self.remaining_input_tokens,
+            "usage_percent": self.usage_percent,
+            "usage_source": self.usage_source,
             "estimated_cost": self.estimated_cost,
             "budget_trimmed": self.budget_trimmed,
             "trimming_reason": self.trimming_reason,

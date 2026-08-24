@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from typing import Any
@@ -9,6 +10,8 @@ from fastapi import HTTPException, status
 from app.core.config import settings
 from app.llm.base import BaseLLM
 from app.llm.errors import LLMAllProvidersFailed, LLMCancelledError, LLMError
+from app.llm.execution_profile import ExecutionProfile
+from app.llm.model_capabilities import ModelCapabilities, ModelCapabilityRegistry
 from app.llm.versions import current_pipeline_versions
 
 from app.rag.prompt_builder import PromptBuilder
@@ -40,9 +43,9 @@ from app.rag.document_metadata import (
     enrich_chunks_from_documents,
     load_documents_for_chunks,
 )
-from app.rag.prompts import LEGAL_SYSTEM_PROMPT
 from app.rag.token_budget import TokenBudgetManager
 from app.rag.language import detect_language
+from app.services.token_usage_service import apply_provider_usage
 
 
 logger = logging.getLogger(__name__)
@@ -89,6 +92,29 @@ def _safe_str_attr(obj: object, name: str, default: str) -> str:
     return text or default
 
 
+def _capabilities_from_llm(llm: BaseLLM) -> ModelCapabilities | None:
+    getter = getattr(llm, "capabilities", None)
+    if getter is None:
+        return None
+    try:
+        from unittest.mock import Mock
+
+        if isinstance(llm, Mock):
+            configured = getattr(getter, "return_value", None)
+            if isinstance(configured, ModelCapabilities):
+                return configured
+            return None
+        caps = getter() if callable(getter) else getter
+    except Exception:  # noqa: BLE001 — mocks / missing adapters
+        return None
+    if inspect.iscoroutine(caps):
+        caps.close()
+        return None
+    if isinstance(caps, ModelCapabilities):
+        return caps
+    return None
+
+
 class RAGService:
     """
     Production Legal Chatbot RAG Pipeline.
@@ -120,10 +146,16 @@ class RAGService:
         self._response_formatter = response_formatter
         self._answer_guard = answer_guard or AnswerGuard()
         self._documents = document_repository
-        self._reasoning = ReasoningPipeline(llm)
+        caps = _capabilities_from_llm(llm)
+        self._profile = ExecutionProfile.for_capabilities(caps)
+        self._reasoning = ReasoningPipeline(llm, profile=self._profile)
         self._evidence_engine = evidence_engine or EvidenceEngine()
         self._planner = legal_query_planner or LegalQueryPlanner()
-        self._token_budget = token_budget_manager or TokenBudgetManager()
+        resolved_caps = caps or ModelCapabilityRegistry.resolve()
+        self._token_budget = token_budget_manager or TokenBudgetManager(
+            capabilities=caps,
+            limits=self._profile.token_limits(resolved_caps),
+        )
 
     async def execute(
         self,
@@ -145,6 +177,8 @@ class RAGService:
             "retry_count": 0,
             "fallback_used": False,
             "error_type": None,
+            "compact_prompts": self._profile.compact_prompts,
+            "two_stage_enabled": self._profile.two_stage_reasoning,
         }
         versions = current_pipeline_versions(
             model=_safe_str_attr(self._llm, "model_name", settings.CHAT_MODEL),
@@ -402,8 +436,9 @@ class RAGService:
             history=history,
             chunks=chunks,
             memories=memories,
-            system_prompt=LEGAL_SYSTEM_PROMPT,
+            system_prompt=self._profile.system_prompt,
             document_qa_mode=document_qa_mode or document_task,
+            duplicate_system_in_user=self._profile.embed_system_in_user_prompt,
         )
         chunks = packed.chunks
         history_for_prompt = packed.history
@@ -411,49 +446,43 @@ class RAGService:
             packed.metadata.to_dict() if packed.metadata else None
         )
 
-        prompt = self._prompt_builder.build(
+        prompt = self._format_user_prompt(
             question=question,
             history=history_for_prompt,
             chunks=chunks,
             memories=memories,
-            task=task_obj,
-            document_scoped=document_task,
-            document_qa_mode=(
-                document_qa_mode and not document_task and not mixed_qa_mode
-            ),
+            task_obj=task_obj,
+            document_task=document_task,
+            document_qa_mode=document_qa_mode,
             mixed_qa_mode=mixed_qa_mode,
             evidence_strength=evidence_strength,
             evidence_assessment=evidence_assessment,
             complexity=complexity,
-            conversation_summary=packed.conversation_summary,
-            active_legal_context=packed.active_legal_context,
+            packed=packed,
             language=language,
         )
 
         # Post-format safety: drop evidence if scaffolding pushed over budget.
         packed = self._token_budget.ensure_prompt_within_budget(
             prompt,
-            system_prompt=LEGAL_SYSTEM_PROMPT,
+            system_prompt=self._profile.system_prompt,
             packed=packed,
         )
         if packed.chunks is not chunks:
             chunks = packed.chunks
-            prompt = self._prompt_builder.build(
+            prompt = self._format_user_prompt(
                 question=question,
                 history=history_for_prompt,
                 chunks=chunks,
                 memories=memories,
-                task=task_obj,
-                document_scoped=document_task,
-                document_qa_mode=(
-                    document_qa_mode and not document_task and not mixed_qa_mode
-                ),
+                task_obj=task_obj,
+                document_task=document_task,
+                document_qa_mode=document_qa_mode,
                 mixed_qa_mode=mixed_qa_mode,
                 evidence_strength=evidence_strength,
                 evidence_assessment=evidence_assessment,
                 complexity=complexity,
-                conversation_summary=packed.conversation_summary,
-                active_legal_context=packed.active_legal_context,
+                packed=packed,
                 language=language,
             )
             token_budget_meta = (
@@ -511,12 +540,14 @@ class RAGService:
             llm_execution["model"] = versions.model
 
         # Prefer provider-reported usage when available; keep budget estimate otherwise.
-        if generation.prompt_tokens is not None and token_budget_meta is not None:
-            token_budget_meta["input_tokens"] = generation.prompt_tokens
-            if generation.completion_tokens is not None:
-                token_budget_meta["output_tokens"] = generation.completion_tokens
-            if generation.total_tokens is not None:
-                token_budget_meta["total_tokens"] = generation.total_tokens
+        if token_budget_meta is not None:
+            token_budget_meta = apply_provider_usage(
+                token_budget_meta,
+                prompt_tokens=generation.prompt_tokens,
+                completion_tokens=generation.completion_tokens,
+                total_tokens=generation.total_tokens,
+                capabilities=self._token_budget.capabilities,
+            )
 
         logger.info(
             "LLM completed tokens=%s two_stage=%s complexity=%s "
@@ -604,6 +635,44 @@ class RAGService:
                 conversation_context=conversation_context,
                 language=language_meta,
             )
+        )
+
+    def _format_user_prompt(
+        self,
+        *,
+        question: str,
+        history,
+        chunks,
+        memories,
+        task_obj,
+        document_task: bool,
+        document_qa_mode: bool,
+        mixed_qa_mode: bool,
+        evidence_strength,
+        evidence_assessment,
+        complexity,
+        packed,
+        language,
+    ) -> str:
+        return self._prompt_builder.build(
+            question=question,
+            history=history,
+            chunks=chunks,
+            memories=memories,
+            task=task_obj,
+            document_scoped=document_task,
+            document_qa_mode=(
+                document_qa_mode and not document_task and not mixed_qa_mode
+            ),
+            mixed_qa_mode=mixed_qa_mode,
+            evidence_strength=evidence_strength,
+            evidence_assessment=evidence_assessment,
+            complexity=complexity,
+            conversation_summary=packed.conversation_summary,
+            active_legal_context=packed.active_legal_context,
+            language=language,
+            include_system_in_user=self._profile.embed_system_in_user_prompt,
+            compact=self._profile.compact_prompts,
         )
 
     @staticmethod

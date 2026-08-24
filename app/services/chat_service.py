@@ -14,6 +14,7 @@ from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
 )
+from app.services.token_usage_service import token_usage_from_budget
 
 from app.services.conversation_service import (
     ConversationService,
@@ -229,6 +230,13 @@ class ChatService:
             resources=result.get("resources", []),
             retrieval_metadata=result.get("retrieval_metadata"),
             grounding_status=result.get("grounding_status"),
+            token_usage=token_usage_from_budget(
+                (
+                    result.get("retrieval_metadata").token_budget
+                    if result.get("retrieval_metadata") is not None
+                    else None
+                ),
+            ),
         )
 
     async def _verify_document_access(

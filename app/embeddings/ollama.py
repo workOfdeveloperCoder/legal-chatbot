@@ -19,7 +19,7 @@ class OllamaEmbedding(BaseEmbedding):
 
     def __init__(self) -> None:
         self._client = httpx.AsyncClient(
-            base_url=settings.LLM_URL,
+            base_url=settings.embedding_base_url,
             timeout=httpx.Timeout(
                 connect=300,   # wait to connect to Ollama (5 min)
                 read=3600,     # wait for response generation (60 min)

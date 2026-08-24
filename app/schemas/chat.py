@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.schemas.llm import TokenUsageResponse
+
 
 class ChatRequest(BaseModel):
     matter_id: UUID | None = None
@@ -172,3 +174,5 @@ class ChatResponse(BaseModel):
     retrieval_metadata: RetrievalMetadataResponse | None = None
 
     grounding_status: str | None = None
+
+    token_usage: TokenUsageResponse | None = None

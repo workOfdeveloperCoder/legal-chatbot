@@ -95,6 +95,8 @@ def _manager(
 class TestTokenCounting:
     def test_exact_tiktoken_counting(self):
         counter = build_token_counter("cl100k_base", enabled=True)
+        if not isinstance(counter, TiktokenCounter):
+            pytest.skip("tiktoken encoding cl100k_base is not cached locally")
         assert isinstance(counter, TiktokenCounter)
         assert counter.is_exact is True
         assert counter.count("hello world") == 2
@@ -326,7 +328,10 @@ class TestHistoryTrimming:
 
 class TestModelAndCost:
     def test_model_specific_limits(self):
-        deepseek = ModelCapabilityRegistry.resolve(model_name="deepseek-r1:32b")
+        deepseek = ModelCapabilityRegistry.resolve(
+            provider="ollama",
+            model_name="deepseek-r1:32b",
+        )
         gpt = ModelCapabilityRegistry.resolve(
             provider="openai",
             model_name="gpt-4o",
@@ -364,6 +369,7 @@ class TestModelAndCost:
         meta = packed.metadata.to_dict()
         for key in (
             "model",
+            "provider",
             "context_window",
             "input_tokens",
             "output_tokens",
@@ -378,6 +384,9 @@ class TestModelAndCost:
             "estimated_cost",
             "budget_trimmed",
             "trimming_reason",
+            "remaining_input_tokens",
+            "usage_percent",
+            "usage_source",
         ):
             assert key in meta
 

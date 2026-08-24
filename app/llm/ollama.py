@@ -9,6 +9,7 @@ from app.core.config import settings
 from app.llm.base import BaseLLM
 from app.llm.errors import LLMPermanentError, LLMTransientError
 from app.llm.model_capabilities import ModelCapabilities, ModelCapabilityRegistry
+from app.llm.registry import LLMAdapterRegistry
 from app.rag.reasoning_cleanup import strip_reasoning_output
 from app.schemas.llm import (
     ChatCompletionRequest,
@@ -23,6 +24,11 @@ _R1_MIN_PREDICT = 4096
 _R1_RETRY_PREDICT = 8192
 
 
+@LLMAdapterRegistry.register(
+    "ollama",
+    online=False,
+    default_url="http://localhost:11434",
+)
 class OllamaLLM(BaseLLM):
     """Local Ollama / DeepSeek adapter."""
 
@@ -50,6 +56,22 @@ class OllamaLLM(BaseLLM):
         self._caps = ModelCapabilityRegistry.resolve(
             provider="ollama",
             model_name=self.model_name,
+        )
+
+    @classmethod
+    def connect(
+        cls,
+        *,
+        provider: str,
+        base_url: str,
+        model: str,
+        api_key: str | None,
+        timeout_seconds: int,
+    ) -> OllamaLLM:
+        return cls(
+            base_url=base_url,
+            model=model,
+            timeout_seconds=timeout_seconds,
         )
 
     def capabilities(self) -> ModelCapabilities:

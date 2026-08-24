@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.core.config import settings
 from app.llm.base import BaseLLM
-from app.rag.prompts import LEGAL_SYSTEM_PROMPT, REASONING_SYSTEM_PROMPT
+from app.llm.execution_profile import ExecutionProfile
+from app.llm.model_capabilities import ModelCapabilities
+from app.rag.prompts import REASONING_SYSTEM_PROMPT
 from app.rag.query_complexity import QueryComplexity
 from app.rag.reasoning_cleanup import strip_reasoning_output
 from app.schemas.llm import ChatCompletionRequest, ChatCompletionResponse, ChatMessage
@@ -72,8 +73,24 @@ Rules:
 class ReasoningPipeline:
     """Optional two-stage generation for research/complex legal questions."""
 
-    def __init__(self, llm: BaseLLM) -> None:
+    def __init__(
+        self,
+        llm: BaseLLM,
+        profile: ExecutionProfile | None = None,
+    ) -> None:
         self._llm = llm
+        if profile is not None:
+            self._profile = profile
+        else:
+            caps = None
+            getter = getattr(llm, "capabilities", None)
+            try:
+                raw = getter() if callable(getter) else None
+                if isinstance(raw, ModelCapabilities):
+                    caps = raw
+            except Exception:  # noqa: BLE001
+                caps = None
+            self._profile = ExecutionProfile.for_capabilities(caps)
 
     async def generate(
         self,
@@ -84,7 +101,7 @@ class ReasoningPipeline:
         max_tokens: int = 2048,
     ) -> GenerationResult:
         use_two_stage = (
-            settings.ENABLE_TWO_STAGE_REASONING
+            self._profile.two_stage_reasoning
             and complexity in {
                 QueryComplexity.RESEARCH,
                 QueryComplexity.COMPLEX,
@@ -138,7 +155,7 @@ class ReasoningPipeline:
     ) -> ChatCompletionResponse:
         request = ChatCompletionRequest(
             messages=[
-                ChatMessage(role="system", content=LEGAL_SYSTEM_PROMPT),
+                ChatMessage(role="system", content=self._profile.system_prompt),
                 ChatMessage(role="user", content=user_prompt),
             ],
             temperature=temperature,
@@ -188,7 +205,7 @@ class ReasoningPipeline:
     ) -> ChatCompletionResponse:
         request = ChatCompletionRequest(
             messages=[
-                ChatMessage(role="system", content=LEGAL_SYSTEM_PROMPT),
+                ChatMessage(role="system", content=self._profile.system_prompt),
                 ChatMessage(
                     role="user",
                     content=(

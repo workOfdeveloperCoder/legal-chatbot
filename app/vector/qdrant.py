@@ -117,17 +117,21 @@ class QdrantService:
 
         Never recreate it here.
         """
-
-
-        await self._ensure_collection(
-            self.document_collection
-        )
-
-
-        await self._ensure_collection(
-            self.memory_collection
-        )
-
+        try:
+            await self._ensure_collection(
+                self.document_collection
+            )
+            await self._ensure_collection(
+                self.memory_collection
+            )
+        except Exception as exc:
+            host = settings.QDRANT_HOST
+            port = settings.QDRANT_PORT
+            raise RuntimeError(
+                f"Cannot connect to Qdrant at {host}:{port}. "
+                "Start Docker Desktop (the existing `qdrant` container should "
+                "come up on ports 6333-6334), then retry uvicorn."
+            ) from exc
 
         logger.info(
             "Qdrant initialization completed"

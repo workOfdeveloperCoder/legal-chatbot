@@ -10,6 +10,8 @@ from app.core.config import settings
 from app.llm.base import BaseLLM
 from app.llm.errors import LLMPermanentError, LLMTransientError
 from app.llm.model_capabilities import ModelCapabilities, ModelCapabilityRegistry
+from app.llm.registry import LLMAdapterRegistry
+from app.llm.provider_config import adapter_provider_name
 from app.rag.reasoning_cleanup import strip_reasoning_output
 from app.schemas.llm import (
     ChatCompletionRequest,
@@ -19,12 +21,35 @@ from app.schemas.llm import (
 logger = logging.getLogger(__name__)
 
 
+@LLMAdapterRegistry.register(
+    "openai",
+    "openai_compatible",
+    "deepseek",
+    "groq",
+    "openrouter",
+    "gemini",
+    "mistral",
+    "together",
+    "fireworks",
+    online=True,
+    default_urls={
+        "openai": "https://api.openai.com/v1",
+        "deepseek": "https://api.deepseek.com/v1",
+        "groq": "https://api.groq.com/openai/v1",
+        "openrouter": "https://openrouter.ai/api/v1",
+        "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "mistral": "https://api.mistral.ai/v1",
+        "together": "https://api.together.xyz/v1",
+        "fireworks": "https://api.fireworks.ai/inference/v1",
+    },
+)
 class OpenAICompatibleLLM(BaseLLM):
     """
     OpenAI Chat Completions-compatible adapter.
 
-    Works with OpenAI and any OpenAI-compatible online API.
-    Credentials come from config/env — never hard-coded.
+    Use this for OpenAI and any hosted API that speaks the same protocol
+    (DeepSeek, Groq, OpenRouter, Gemini OpenAI mode, Mistral, Together).
+    For a different wire protocol, add a new BaseLLM subclass instead.
     """
 
     def __init__(
@@ -39,10 +64,15 @@ class OpenAICompatibleLLM(BaseLLM):
     ) -> None:
         self.provider_name = provider_name
         self.model_name = model or settings.CHAT_MODEL
-        self._api_key = api_key if api_key is not None else settings.LLM_API_KEY
+        self._api_key = (
+            api_key
+            if api_key is not None
+            else settings.api_key_for_provider(provider_name)
+        )
         base = (base_url or settings.LLM_URL).rstrip("/")
-        # Accept either root or /v1
-        if base.endswith("/v1"):
+        # Accept /v1, or a vendor root that already includes the protocol prefix
+        # (Gemini: .../v1beta/openai). Do not append a second /v1.
+        if base.endswith("/v1") or base.endswith("/openai"):
             self._base_url = base
         else:
             self._base_url = f"{base}/v1"
@@ -68,20 +98,53 @@ class OpenAICompatibleLLM(BaseLLM):
             model_name=self.model_name,
         )
 
+    @classmethod
+    def connect(
+        cls,
+        *,
+        provider: str,
+        base_url: str,
+        model: str,
+        api_key: str | None,
+        timeout_seconds: int,
+    ) -> OpenAICompatibleLLM:
+        return cls(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            provider_name=adapter_provider_name(provider),
+        )
+
     def capabilities(self) -> ModelCapabilities:
         return self._caps
+
+    def _completion_payload(
+        self,
+        request: ChatCompletionRequest,
+        *,
+        stream: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.model_name,
+            "messages": [m.model_dump() for m in request.messages],
+            "stream": stream,
+        }
+        if self._caps.supports_temperature:
+            payload["temperature"] = request.temperature
+        if self._caps.uses_max_completion_tokens:
+            payload["max_completion_tokens"] = request.max_tokens
+        else:
+            payload["max_tokens"] = request.max_tokens
+        if stream:
+            payload["stream_options"] = {"include_usage": True}
+        return payload
 
     async def generate(
         self,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
-        payload: dict[str, Any] = {
-            "model": self.model_name,
-            "messages": [m.model_dump() for m in request.messages],
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
-            "stream": False,
-        }
+        payload = self._completion_payload(request, stream=False)
         try:
             response = await self.client.post("/chat/completions", json=payload)
         except httpx.TimeoutException as exc:
@@ -146,13 +209,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 yield chunk
             return
 
-        payload: dict[str, Any] = {
-            "model": self.model_name,
-            "messages": [m.model_dump() for m in request.messages],
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
-            "stream": True,
-        }
+        payload = self._completion_payload(request, stream=True)
         try:
             async with self.client.stream(
                 "POST",

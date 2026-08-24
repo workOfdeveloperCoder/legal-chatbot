@@ -50,3 +50,18 @@ class BaseLLM(ABC):
             "provider": self.provider_name,
             "model": self.model_name,
         }
+
+    @classmethod
+    def connect(
+        cls,
+        *,
+        provider: str,
+        base_url: str,
+        model: str,
+        api_key: str | None,
+        timeout_seconds: int,
+    ) -> BaseLLM:
+        """Build this adapter from factory-resolved connection settings."""
+        raise NotImplementedError(
+            f"{cls.__name__} must implement connect() to be registered"
+        )
