@@ -34,7 +34,7 @@ def test_local_ollama_tag_is_remapped_for_openai():
 
 
 def test_online_timeout_does_not_inherit_local_30_minute_wait():
-    assert effective_llm_timeout("openai", 1800) == 180
+    assert effective_llm_timeout("openai", 1800) == 120
     assert effective_llm_timeout("openai", 90) == 90
     assert effective_llm_timeout("ollama", 1800) == 1800
 

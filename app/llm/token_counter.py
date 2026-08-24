@@ -47,8 +47,8 @@ class FallbackTokenEstimator:
         pieces = _WORD_RE.findall(text)
         if not pieces:
             return 0
-        # Legal prose averages slightly under 1 BPE token per word/punct piece.
-        return max(1, int(round(len(pieces) * 0.75)))
+        # Over-estimate so packing stays under the real model window.
+        return max(1, int(round(len(pieces) * 1.35)))
 
 
 class TiktokenCounter:
@@ -92,6 +92,26 @@ class FixedTokenCounter:
         return len(text.split())
 
 
+class ScaledTokenCounter:
+    """Inflates counts from an inexact estimator so packing stays conservative."""
+
+    def __init__(self, inner: TokenCounter, factor: float) -> None:
+        self._inner = inner
+        self._factor = max(1.0, factor)
+
+    @property
+    def tokenizer_id(self) -> str:
+        return self._inner.tokenizer_id
+
+    @property
+    def is_exact(self) -> bool:
+        return False
+
+    def count(self, text: str | None) -> int:
+        raw = self._inner.count(text)
+        return max(raw, int(round(raw * self._factor)))
+
+
 @lru_cache(maxsize=8)
 def _load_tiktoken_encoding(encoding_name: str):
     import tiktoken
@@ -122,7 +142,7 @@ def build_token_counter(
         return TiktokenCounter(name, encoding)
     except Exception as exc:  # noqa: BLE001 — soft fallback is intentional
         logger.warning(
-            "Tokenizer %s unavailable (%s); using fallback estimator",
+            "Tokenizer %s unavailable (%s); using conservative fallback estimator",
             name,
             exc,
         )

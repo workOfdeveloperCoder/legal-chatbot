@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.llm.base import BaseLLM
 from app.llm.errors import LLMAllProvidersFailed, LLMCancelledError, LLMError
 from app.llm.execution_profile import ExecutionProfile
+from app.llm.firewall import LLMFirewall
 from app.llm.model_capabilities import ModelCapabilities, ModelCapabilityRegistry
 from app.llm.versions import current_pipeline_versions
 
@@ -18,6 +19,7 @@ from app.rag.prompt_builder import PromptBuilder
 from app.rag.models import (
     Memory,
     Message,
+    RetrievalMetadata,
 )
 
 from app.rag.repository import BaseRetriever
@@ -44,6 +46,7 @@ from app.rag.document_metadata import (
     load_documents_for_chunks,
 )
 from app.rag.token_budget import TokenBudgetManager
+from app.rag.token_budget.manager import TokenBudgetExceeded
 from app.rag.language import detect_language
 from app.services.token_usage_service import apply_provider_usage
 
@@ -137,6 +140,7 @@ class RAGService:
         evidence_engine: EvidenceEngine | None = None,
         legal_query_planner: LegalQueryPlanner | None = None,
         token_budget_manager: TokenBudgetManager | None = None,
+        firewall: LLMFirewall | None = None,
     ) -> None:
 
         self._llm = llm
@@ -146,6 +150,7 @@ class RAGService:
         self._response_formatter = response_formatter
         self._answer_guard = answer_guard or AnswerGuard()
         self._documents = document_repository
+        self._firewall = firewall or LLMFirewall()
         caps = _capabilities_from_llm(llm)
         self._profile = ExecutionProfile.for_capabilities(caps)
         self._reasoning = ReasoningPipeline(llm, profile=self._profile)
@@ -169,6 +174,7 @@ class RAGService:
         conversation_id: str | None = None,
         document_id: str | None = None,
         query_plan: LegalQueryPlan | None = None,
+        token_callback=None,
     ) -> dict[str, Any]:
 
         t0 = time.perf_counter()
@@ -246,6 +252,47 @@ class RAGService:
         needs_legal_authority = plan.requires_legal_authority
         complexity = plan.complexity
 
+        if settings.LLM_FIREWALL_ENABLED:
+            has_uploads = bool(document_id) or bool(
+                plan.uploaded_document_primary
+            )
+            firewall_result = self._firewall.screen(
+                question,
+                history=history,
+                matter_id=matter_id,
+                document_id=document_id,
+                has_uploaded_documents=has_uploads,
+                language=language,
+            )
+            llm_execution["firewall"] = firewall_result.to_metadata()
+            if not firewall_result.allowed:
+                logger.info(
+                    "LLM firewall blocked user=%s decision=%s reason=%s",
+                    user_id,
+                    firewall_result.decision.value,
+                    firewall_result.reason,
+                )
+                return self._finalize_response(
+                    self._response_formatter.format(
+                        answer=firewall_result.refusal_message,
+                        chunks=[],
+                        retrieval_metadata=RetrievalMetadata(),
+                        evidence_strength=None,
+                        grounding_status=None,
+                        citation_validation=None,
+                        used_conversation_context=False,
+                        query_plan=plan.to_metadata(),
+                        pipeline_versions=versions.to_dict(),
+                        performance={
+                            "total_latency_ms": round(
+                                (time.perf_counter() - t0) * 1000, 2
+                            ),
+                        },
+                        llm_execution=llm_execution,
+                        language=language_meta,
+                    )
+                )
+
         logger.info(
             "RAG started user=%s matter=%s conversation=%s "
             "document_id=%s task=%s mode=%s strategy=%s "
@@ -300,7 +347,7 @@ class RAGService:
         )
 
         if retrieval is None:
-            from app.rag.models import RetrievalMetadata, RetrievalOutcome
+            from app.rag.models import RetrievalOutcome
 
             retrieval = RetrievalOutcome(
                 chunks=[],
@@ -431,23 +478,30 @@ class RAGService:
             )
 
         t_budget = time.perf_counter()
-        packed = self._token_budget.prepare(
-            question=question,
-            history=history,
-            chunks=chunks,
-            memories=memories,
-            system_prompt=self._profile.system_prompt,
-            document_qa_mode=document_qa_mode or document_task,
-            duplicate_system_in_user=self._profile.embed_system_in_user_prompt,
-        )
+        try:
+            packed = self._token_budget.prepare(
+                question=question,
+                history=history,
+                chunks=chunks,
+                memories=memories,
+                system_prompt=self._profile.system_prompt,
+                document_qa_mode=document_qa_mode or document_task,
+                duplicate_system_in_user=self._profile.embed_system_in_user_prompt,
+            )
+        except TokenBudgetExceeded as exc:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=str(exc),
+            ) from exc
         chunks = packed.chunks
         history_for_prompt = packed.history
+        question_for_prompt = packed.question if packed.question is not None else question
         token_budget_meta = (
             packed.metadata.to_dict() if packed.metadata else None
         )
 
         prompt = self._format_user_prompt(
-            question=question,
+            question=question_for_prompt,
             history=history_for_prompt,
             chunks=chunks,
             memories=memories,
@@ -463,15 +517,21 @@ class RAGService:
         )
 
         # Post-format safety: drop evidence if scaffolding pushed over budget.
-        packed = self._token_budget.ensure_prompt_within_budget(
-            prompt,
-            system_prompt=self._profile.system_prompt,
-            packed=packed,
-        )
+        try:
+            packed = self._token_budget.ensure_prompt_within_budget(
+                prompt,
+                system_prompt=self._profile.system_prompt,
+                packed=packed,
+            )
+        except TokenBudgetExceeded as exc:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=str(exc),
+            ) from exc
         if packed.chunks is not chunks:
             chunks = packed.chunks
             prompt = self._format_user_prompt(
-                question=question,
+                question=question_for_prompt,
                 history=history_for_prompt,
                 chunks=chunks,
                 memories=memories,
@@ -496,12 +556,41 @@ class RAGService:
 
         t_llm = time.perf_counter()
         try:
-            generation = await self._reasoning.generate(
-                user_prompt=prompt,
-                complexity=complexity,
-                temperature=settings.LLM_TEMPERATURE,
-                max_tokens=packed.reserved_output_tokens,
-            )
+            if token_callback is not None:
+                from app.rag.reasoning_cleanup import strip_reasoning_output
+                from app.rag.reasoning_pipeline import GenerationResult
+                from app.schemas.llm import ChatCompletionRequest, ChatMessage
+
+                request = ChatCompletionRequest(
+                    messages=[
+                        ChatMessage(
+                            role="system",
+                            content=self._profile.system_prompt,
+                        ),
+                        ChatMessage(role="user", content=prompt),
+                    ],
+                    temperature=settings.LLM_TEMPERATURE,
+                    max_tokens=packed.reserved_output_tokens,
+                )
+                pieces: list[str] = []
+                async for piece in self._llm.generate_stream(request):
+                    if not piece:
+                        continue
+                    pieces.append(piece)
+                    maybe = token_callback(piece)
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                generation = GenerationResult(
+                    content=strip_reasoning_output("".join(pieces)),
+                    two_stage=False,
+                )
+            else:
+                generation = await self._reasoning.generate(
+                    user_prompt=prompt,
+                    complexity=complexity,
+                    temperature=settings.LLM_TEMPERATURE,
+                    max_tokens=packed.reserved_output_tokens,
+                )
         except LLMCancelledError:
             raise HTTPException(
                 status_code=499,
@@ -528,6 +617,20 @@ class RAGService:
                 ),
             )
         perf["llm_latency_ms"] = round((time.perf_counter() - t_llm) * 1000, 2)
+
+        if settings.LLM_FIREWALL_ENABLED:
+            output_guard = self._firewall.screen_output(
+                generation.content,
+                language=language,
+            )
+            if not output_guard.allowed:
+                logger.warning(
+                    "LLM firewall blocked generated output user=%s reason=%s",
+                    user_id,
+                    output_guard.reason,
+                )
+                llm_execution["firewall"] = output_guard.to_metadata()
+                generation.content = output_guard.refusal_message
 
         gateway_stats = getattr(self._llm, "last_stats", None)
         if gateway_stats is not None:

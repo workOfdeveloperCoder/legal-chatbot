@@ -166,6 +166,8 @@ class LLMGateway(BaseLLM):
                 cleaned = (piece or "").strip()
                 if cleaned:
                     yield piece
+        except asyncio.CancelledError as exc:
+            raise LLMCancelledError() from exc
         except LLMError:
             if self._fallback is None:
                 raise

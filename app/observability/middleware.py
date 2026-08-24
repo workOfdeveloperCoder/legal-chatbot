@@ -63,6 +63,18 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             request.headers.get("authorization"),
         )
 
+        store_bodies = settings.LOG_STORE_CHAT_BODIES or (
+            "/chat" not in request.url.path
+        )
+        parsed_request = (
+            truncate_payload(
+                parse_json_body(body_bytes),
+                max_bytes=settings.LOG_BODY_MAX_BYTES,
+            )
+            if store_bodies
+            else {"_omitted": "chat_body"}
+        )
+
         context_token = bind_request_context(
             request_id=request_id,
             user_id=user_id,
@@ -71,10 +83,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             method=request.method,
             path=request.url.path,
             query_params=dict(request.query_params),
-            request_body=truncate_payload(
-                parse_json_body(body_bytes),
-                max_bytes=settings.LOG_BODY_MAX_BYTES,
-            ),
+            request_body=parsed_request,
         )
 
         response: Response | None = None
@@ -85,7 +94,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
             status_code = response.status_code
 
-            if settings.LOG_ENABLE_RESPONSE_BODY:
+            if settings.LOG_ENABLE_RESPONSE_BODY and store_bodies:
                 response_body, response = await self._capture_response_body(
                     response,
                 )
@@ -107,10 +116,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                     request_headers=sanitize_headers(
                         {key: value for key, value in request.headers.items()}
                     ),
-                    request_body=truncate_payload(
-                        parse_json_body(body_bytes),
-                        max_bytes=settings.LOG_BODY_MAX_BYTES,
-                    ),
+                    request_body=parsed_request if store_bodies else {"_omitted": "chat_body"},
                     response_status=status_code,
                     response_body=truncate_payload(
                         response_body,

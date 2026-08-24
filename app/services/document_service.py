@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import UploadFile, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.document import (
     Document,
     DocumentScope,
@@ -26,6 +27,14 @@ from app.vector.service import VectorService
 
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_SUFFIXES = {".pdf", ".txt", ".md", ".csv"}
+_ALLOWED_MIMES = {
+    "application/pdf",
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+}
 
 
 class DocumentService:
@@ -223,7 +232,7 @@ class DocumentService:
         content = await file.read()
 
 
-        if len(content) > self.MAX_FILE_SIZE:
+        if len(content) > settings.MAX_UPLOAD_BYTES:
 
             raise HTTPException(
                 status_code=413,
@@ -245,10 +254,21 @@ class DocumentService:
                 detail="Filename missing",
             )
 
+        suffix = Path(safe_name).suffix.lower()
+        mime = (file.content_type or "").lower()
+        allowed_type = (
+            suffix in _ALLOWED_SUFFIXES
+            or mime in _ALLOWED_MIMES
+            or (mime == "application/octet-stream" and suffix in _ALLOWED_SUFFIXES)
+        )
+        if not allowed_type:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported file type. Upload a PDF or text document.",
+            )
 
-        upload_dir = Path(
-            "storage/documents"
-        ).resolve()
+
+        upload_dir = Path(settings.UPLOAD_DIR).resolve()
 
 
         upload_dir.mkdir(

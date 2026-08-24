@@ -5,11 +5,7 @@ import uuid
 
 from uuid import UUID
 
-from qdrant_client import AsyncQdrantClient
-
-from qdrant_client.models import (
-    PointStruct,
-)
+from qdrant_client.models import PointStruct
 
 from app.core.config import settings
 from app.embeddings.service import EmbeddingService
@@ -17,6 +13,7 @@ from app.embeddings.service import EmbeddingService
 from app.rag.models import Memory
 
 from app.vector.filters import QdrantFilterBuilder
+from app.vector.qdrant import qdrant_service
 
 
 logger = logging.getLogger(__name__)
@@ -73,13 +70,7 @@ class MemoryService:
 
     def __init__(self):
 
-        self.client = AsyncQdrantClient(
-
-            host=settings.QDRANT_HOST,
-
-            port=settings.QDRANT_PORT,
-
-        )
+        self.client = qdrant_service.client
 
 
         self.collection = (

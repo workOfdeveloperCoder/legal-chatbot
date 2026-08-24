@@ -203,7 +203,9 @@ class TokenUsageService:
             context_window=caps.context_window,
             max_output_tokens=caps.max_output_tokens,
             tokenizer_id=self.counter.tokenizer_id,
-            tokenizer_exact=self.counter.is_exact,
+            tokenizer_exact=bool(
+                self.counter.is_exact and caps.tokenizer_native
+            ),
             available_input_tokens=self.available_input_tokens,
             reserved_output_tokens=self.reserved_output_tokens,
             safety_margin_tokens=self.safety_margin_tokens,
@@ -240,5 +242,7 @@ class TokenUsageService:
             model=self.capabilities.model_name,
             provider=self.capabilities.provider,
             tokenizer_id=self.counter.tokenizer_id,
-            tokenizer_exact=self.counter.is_exact,
+            tokenizer_exact=bool(
+                self.counter.is_exact and self.capabilities.tokenizer_native
+            ),
         )

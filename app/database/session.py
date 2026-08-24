@@ -8,10 +8,18 @@ from sqlalchemy.ext.asyncio import (
 
 from app.core.config import settings
 
+_engine_kwargs: dict = {
+    "echo": settings.DEBUG,
+    "future": True,
+    "pool_pre_ping": True,
+}
+if not str(settings.DATABASE_URL).startswith("sqlite"):
+    _engine_kwargs["pool_size"] = settings.DB_POOL_SIZE
+    _engine_kwargs["max_overflow"] = settings.DB_MAX_OVERFLOW
+
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=settings.DEBUG,
-    future=True,
+    **_engine_kwargs,
 )
 
 AsyncSessionLocal = async_sessionmaker(

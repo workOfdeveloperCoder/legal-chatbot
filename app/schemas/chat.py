@@ -17,6 +17,8 @@ class ChatRequest(BaseModel):
         max_length=20000,
     )
 
+    regenerate: bool = False
+
 
 class Citation(BaseModel):
     """

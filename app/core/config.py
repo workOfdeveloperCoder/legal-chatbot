@@ -21,11 +21,18 @@ class Settings(BaseSettings):
 
     DEBUG: bool = False
 
+    # "production" enables startup checks (Qdrant API key, TRUSTED_HOSTS, LLM key).
+    # Leave as "development" for local work even when DEBUG=false.
+    ENVIRONMENT: str = "development"
+
     API_V1_PREFIX: str = "/api/v1"
 
     CORS_ORIGINS: str = (
         "http://localhost:5173,http://127.0.0.1:5173"
     )
+
+    # Comma-separated hosts. "*" or empty = allow all (local dev only).
+    TRUSTED_HOSTS: str = "*"
 
     @property
     def cors_origins(self) -> list[str]:
@@ -34,6 +41,13 @@ class Settings(BaseSettings):
             for origin in self.CORS_ORIGINS.split(",")
             if origin.strip()
         ]
+
+    @property
+    def trusted_hosts(self) -> list[str]:
+        raw = (self.TRUSTED_HOSTS or "").strip()
+        if not raw or raw == "*":
+            return ["*"]
+        return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 
@@ -57,6 +71,10 @@ class Settings(BaseSettings):
 
     ALEMBIC_DATABASE_URL: str
 
+    DB_POOL_SIZE: int = 10
+
+    DB_MAX_OVERFLOW: int = 20
+
 
 
     # ==================================================
@@ -73,6 +91,10 @@ class Settings(BaseSettings):
 
     UPLOAD_DIR: str = "storage/documents"
 
+    MAX_UPLOAD_BYTES: int = 25 * 1024 * 1024
+
+    MAX_REQUEST_BYTES: int = 32 * 1024 * 1024
+
 
 
     # ==================================================
@@ -82,6 +104,15 @@ class Settings(BaseSettings):
     QDRANT_HOST: str = "localhost"
 
     QDRANT_PORT: int = 6333
+
+    # Full URL overrides host/port when set (e.g. https://qdrant.internal:6333).
+    QDRANT_URL: str | None = None
+
+    QDRANT_API_KEY: str | None = None
+
+    QDRANT_HTTPS: bool = False
+
+    QDRANT_TIMEOUT: int = 30
 
 
     # --------------------------------------------------
@@ -228,7 +259,7 @@ class Settings(BaseSettings):
 
     LLM_TEMPERATURE: float = 0.1
 
-    LLM_ENABLE_STREAMING: bool = False
+    LLM_ENABLE_STREAMING: bool = True
 
     # Hosted models do not need the local R1 two-stage path.
     LLM_TWO_STAGE_ONLINE: bool = False
@@ -293,6 +324,9 @@ class Settings(BaseSettings):
 
     ENABLE_TWO_STAGE_REASONING: bool = True
 
+    # Block programming, illegal how-to, and off-topic chat before the LLM.
+    LLM_FIREWALL_ENABLED: bool = True
+
 
 
     # ==================================================
@@ -346,11 +380,31 @@ class Settings(BaseSettings):
 
     LOG_ENABLE_REQUEST_LOGGING: bool = True
 
-    LOG_ENABLE_RESPONSE_BODY: bool = True
+    # Off by default: chat bodies are client legal data.
+    LOG_ENABLE_RESPONSE_BODY: bool = False
+
+    LOG_STORE_CHAT_BODIES: bool = False
 
     LOG_BODY_MAX_BYTES: int = 16384
 
-    LOG_SKIP_PATHS: str = "/docs,/openapi.json,/redoc"
+    LOG_SKIP_PATHS: str = "/docs,/openapi.json,/redoc,/health,/ready"
+
+    RATE_LIMIT_ENABLED: bool = True
+
+    RATE_LIMIT_AUTH_PER_MINUTE: int = 30
+
+    RATE_LIMIT_CHAT_PER_MINUTE: int = 20
+
+    RATE_LIMIT_UPLOAD_PER_MINUTE: int = 10
+
+    RATE_LIMIT_DEFAULT_PER_MINUTE: int = 60
+
+    # Only honour X-Forwarded-For / X-Real-IP when Nginx is the sole client
+    # of Uvicorn (bind 127.0.0.1). Leave false if the API port is reachable
+    # directly, otherwise clients can spoof the rate-limit key.
+    TRUST_FORWARDED_FOR: bool = False
+
+    TOKEN_FALLBACK_SAFETY_FACTOR: float = 1.2
 
 
     @property
@@ -389,6 +443,10 @@ class Settings(BaseSettings):
         from app.llm.provider_config import is_online_provider
 
         return is_online_provider(self.LLM_PROVIDER)
+
+    @property
+    def is_production(self) -> bool:
+        return (self.ENVIRONMENT or "").strip().lower() == "production"
 
 
 

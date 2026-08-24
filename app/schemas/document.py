@@ -54,6 +54,15 @@ class DocumentResponse(BaseModel):
         """True only when extraction and vector indexing both succeeded."""
         return self.processed and self.vectorized
 
+    @computed_field
+    @property
+    def ingestion_status(self) -> str:
+        if self.processed and self.vectorized:
+            return "ready"
+        if self.processed and not self.vectorized:
+            return "processing"
+        return "failed"
+
 
 TEXT_PREVIEW_LIMIT = 500
 

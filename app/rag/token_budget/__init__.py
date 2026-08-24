@@ -1,4 +1,8 @@
-from app.rag.token_budget.manager import ContextBudgetManager, TokenBudgetManager
+from app.rag.token_budget.manager import (
+    ContextBudgetManager,
+    TokenBudgetExceeded,
+    TokenBudgetManager,
+)
 from app.rag.token_budget.models import (
     PackedContext,
     TokenBudgetLimits,
@@ -8,6 +12,7 @@ from app.rag.token_budget.models import (
 __all__ = [
     "ContextBudgetManager",
     "PackedContext",
+    "TokenBudgetExceeded",
     "TokenBudgetLimits",
     "TokenBudgetManager",
     "TokenUsageMetadata",

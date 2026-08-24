@@ -97,3 +97,4 @@ class PackedContext:
     active_legal_context: str | None = None
     reserved_output_tokens: int = 0
     metadata: TokenUsageMetadata | None = None
+    question: str | None = None

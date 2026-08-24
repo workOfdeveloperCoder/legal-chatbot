@@ -197,7 +197,11 @@ class TestBudgetCore:
             conversation_summary=packed.conversation_summary,
             active_legal_context=packed.active_legal_context,
         )
-        packed = mgr.ensure_prompt_within_budget(prompt, packed=packed)
+        packed = mgr.ensure_prompt_within_budget(
+            prompt,
+            system_prompt="You are a legal research assistant.",
+            packed=packed,
+        )
         total = mgr.counter.count("system") + mgr.counter.count(prompt)
         # Rebuild after possible trim
         if packed.metadata and packed.metadata.budget_trimmed:
@@ -517,7 +521,11 @@ class TestClogOnDiscretionRealistic:
             conversation_summary=packed.conversation_summary,
             active_legal_context=packed.active_legal_context,
         )
-        packed = mgr.ensure_prompt_within_budget(prompt, packed=packed)
+        packed = mgr.ensure_prompt_within_budget(
+            prompt,
+            system_prompt="You are a legal research assistant.",
+            packed=packed,
+        )
         prompt = PromptBuilder().build(
             question=question,
             history=packed.history,
@@ -567,3 +575,176 @@ class TestClogOnDiscretionRealistic:
             assert source.document_id == DOC_ID
             assert source.chunk_id
         assert score_evidence_chunk(packed.chunks[0]) > 0
+
+
+class TestOverflowSafety:
+    def test_huge_question_is_truncated_to_fit_window(self):
+        mgr = _manager(context_window=400, reserved_output=100, safety=20)
+        question = "question " * 400
+        packed = mgr.prepare(
+            question=question,
+            history=[],
+            chunks=[],
+            system_prompt="You are a legal research assistant.",
+        )
+        assert packed.question is not None
+        assert packed.question != question
+        assert mgr.counter.count(packed.question) < mgr.counter.count(question)
+        assert packed.metadata is not None
+        assert packed.metadata.budget_trimmed is True
+        assert "question_truncated" in (packed.metadata.trimming_reason or "")
+        assert packed.metadata.input_tokens <= packed.metadata.available_input_tokens
+
+    def test_impossible_system_plus_question_raises(self):
+        from app.rag.token_budget import TokenBudgetExceeded
+
+        mgr = _manager(context_window=220, reserved_output=80, safety=20)
+        with pytest.raises(TokenBudgetExceeded):
+            mgr.prepare(
+                question="short",
+                history=[],
+                chunks=[],
+                system_prompt="system " * 200,
+            )
+
+    def test_huge_evidence_is_trimmed_not_overflow(self):
+        mgr = _manager(context_window=900, reserved_output=200, safety=50)
+        chunks = [
+            _chunk(
+                id=f"{DOC_ID}:{i}",
+                chunk_id=f"{DOC_ID}:{i}",
+                chunk_index=i,
+                score=0.9 - i * 0.01,
+                relevance_score=0.9 - i * 0.01,
+                text=("statute evidence about section 54-C clog discretion " * 20),
+            )
+            for i in range(12)
+        ]
+        packed = mgr.prepare(
+            question="What does section 54-C say?",
+            history=[],
+            chunks=chunks,
+            system_prompt="You are a legal research assistant.",
+        )
+        assert packed.metadata is not None
+        assert len(packed.chunks) < len(chunks)
+        assert packed.metadata.input_tokens <= packed.metadata.available_input_tokens
+
+    def test_huge_history_is_trimmed(self):
+        mgr = _manager(context_window=900, reserved_output=200, safety=50)
+        history = [
+            Message(role="user", content=f"prior legal question number {i} " * 25)
+            for i in range(20)
+        ]
+        packed = mgr.prepare(
+            question="What is section 54-C?",
+            history=history,
+            chunks=[_chunk()],
+            system_prompt="You are a legal research assistant.",
+        )
+        assert packed.metadata is not None
+        assert len(packed.history) < len(history)
+        assert packed.metadata.input_tokens <= packed.metadata.available_input_tokens
+
+    def test_combined_huge_prompt_stays_within_window(self):
+        mgr = _manager(context_window=1200, reserved_output=250, safety=50)
+        history = [
+            Message(role="user", content=f"history turn {i} about discretion " * 15)
+            for i in range(10)
+        ]
+        chunks = [
+            _chunk(
+                id=f"{DOC_ID}:{i}",
+                chunk_id=f"{DOC_ID}:{i}",
+                chunk_index=i,
+                text=("long legal evidence about clog on discretion " * 18),
+                relevance_score=0.8 - i * 0.02,
+            )
+            for i in range(8)
+        ]
+        packed = mgr.prepare(
+            question="Explain clog on discretion under section 54-C " * 8,
+            history=history,
+            chunks=chunks,
+            system_prompt="You are a legal research assistant.",
+        )
+        assert packed.metadata is not None
+        assert packed.metadata.input_tokens <= packed.metadata.available_input_tokens
+        total = packed.metadata.input_tokens + packed.reserved_output_tokens
+        assert total + packed.metadata.safety_margin_tokens <= packed.metadata.context_window
+
+    def test_ensure_prompt_raises_when_no_chunks_left(self):
+        from app.rag.token_budget import TokenBudgetExceeded
+
+        mgr = _manager(context_window=300, reserved_output=80, safety=20)
+        packed = mgr.prepare(
+            question="hi",
+            history=[],
+            chunks=[],
+            system_prompt="sys",
+        )
+        with pytest.raises(TokenBudgetExceeded):
+            mgr.ensure_prompt_within_budget(
+                "overflow " * 400,
+                system_prompt="sys",
+                packed=packed,
+            )
+
+    def test_gemini_profile_uses_compact_cl100k_approximation(self):
+        from app.llm.execution_profile import ExecutionProfile
+
+        caps = ModelCapabilityRegistry.resolve(
+            provider="gemini",
+            model_name="gemini-3.6-flash",
+        )
+        assert caps.tokenizer_id == "cl100k_base"
+        assert caps.tokenizer_native is False
+        profile = ExecutionProfile.for_capabilities(caps)
+        assert profile.compact_prompts is True
+        assert profile.embed_system_in_user_prompt is False
+        assert profile.reserved_output_tokens <= caps.max_output_tokens
+
+    def test_local_deepseek_profile_keeps_full_prompt(self):
+        from app.llm.execution_profile import ExecutionProfile
+
+        caps = ModelCapabilityRegistry.resolve(
+            provider="ollama",
+            model_name="deepseek-r1:32b",
+        )
+        profile = ExecutionProfile.for_capabilities(caps)
+        assert profile.compact_prompts is False
+        assert profile.embed_system_in_user_prompt is True
+        assert caps.tokenizer_native is True
+
+    def test_fallback_tokenizer_is_detectable(self):
+        counter = build_token_counter("fallback", enabled=True)
+        assert counter.is_exact is False
+        packed_mgr = TokenBudgetManager(
+            capabilities=ModelCapabilities(
+                model_name="deepseek-r1:32b",
+                provider="ollama",
+                context_window=4000,
+                max_output_tokens=800,
+                tokenizer_id="fallback",
+            ),
+            counter=counter,
+            limits=TokenBudgetLimits(
+                context_window=4000,
+                reserved_output_tokens=800,
+                safety_margin=100,
+                max_conversation_tokens=400,
+                max_legal_evidence_tokens=1200,
+                max_matter_evidence_tokens=1200,
+                max_conversation_document_tokens=800,
+                scaffolding_overhead_tokens=50,
+            ),
+        )
+        packed = packed_mgr.prepare(
+            question="What is section 54-C?",
+            history=[],
+            chunks=[_chunk()],
+            system_prompt="sys",
+        )
+        assert packed.metadata is not None
+        assert packed.metadata.tokenizer_exact is False
+

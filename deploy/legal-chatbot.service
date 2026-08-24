@@ -1,0 +1,22 @@
+[Unit]
+Description=LegalGPT API
+After=network.target postgresql.service qdrant.service
+Wants=postgresql.service qdrant.service
+
+[Service]
+Type=simple
+User=legalbot
+Group=legalbot
+WorkingDirectory=/opt/legal-chatbot/app
+EnvironmentFile=/etc/legal-chatbot.env
+# In-process rate limiting is per worker. Use exactly one Uvicorn worker.
+# Bind to loopback only. Nginx is the public HTTPS terminator.
+ExecStart=/opt/legal-chatbot/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

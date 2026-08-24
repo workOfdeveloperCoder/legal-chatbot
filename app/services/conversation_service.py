@@ -210,13 +210,17 @@ class ConversationService:
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
         total_tokens: int | None = None,
-    ) -> tuple[Message, Message]:
+        save_user: bool = True,
+    ) -> tuple[Message | None, Message]:
 
-        user_message = Message(
-            conversation_id=conversation.id,
-            role=MessageRole.USER,
-            content=question,
-        )
+        user_message = None
+        if save_user:
+            user_message = Message(
+                conversation_id=conversation.id,
+                role=MessageRole.USER,
+                content=question,
+            )
+            self.db.add(user_message)
 
         assistant_message = Message(
             conversation_id=conversation.id,
@@ -226,8 +230,6 @@ class ConversationService:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
         )
-
-        self.db.add(user_message)
         self.db.add(assistant_message)
 
         conversation.last_message_at = datetime.now(
@@ -236,9 +238,10 @@ class ConversationService:
 
         await self.db.commit()
 
-        await self.db.refresh(user_message)
         await self.db.refresh(assistant_message)
         await self.db.refresh(conversation)
+        if user_message is not None:
+            await self.db.refresh(user_message)
 
         logger.info(
             "Conversation updated %s",

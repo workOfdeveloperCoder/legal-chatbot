@@ -24,6 +24,12 @@ from app.rag.token_budget.packing import (
 
 logger = logging.getLogger(__name__)
 
+_MIN_QUESTION_TOKENS = 32
+
+
+class TokenBudgetExceeded(ValueError):
+    """Raised when the packed prompt cannot fit the model context window."""
+
 
 class TokenBudgetManager:
     """
@@ -56,10 +62,28 @@ class TokenBudgetManager:
             token_counting_enabled=settings.TOKEN_COUNTING_ENABLED,
             cost_tracking_enabled=settings.TOKEN_COST_TRACKING_ENABLED,
         )
-        self.counter = counter or build_token_counter(
-            self.capabilities.tokenizer_id,
-            enabled=self.limits.token_counting_enabled,
-        )
+        if counter is not None:
+            self.counter = counter
+        else:
+            raw = build_token_counter(
+                self.capabilities.tokenizer_id,
+                enabled=self.limits.token_counting_enabled,
+            )
+            if raw.is_exact:
+                self.counter = raw
+            else:
+                from app.llm.token_counter import ScaledTokenCounter
+
+                self.counter = ScaledTokenCounter(
+                    raw,
+                    settings.TOKEN_FALLBACK_SAFETY_FACTOR,
+                )
+                logger.warning(
+                    "Token packing using conservative estimator "
+                    "tokenizer=%s factor=%s",
+                    raw.tokenizer_id,
+                    settings.TOKEN_FALLBACK_SAFETY_FACTOR,
+                )
 
     def prepare(
         self,
@@ -129,7 +153,27 @@ class TokenBudgetManager:
             fixed = system_tokens + prompt_system_dup + query_tokens + scaffolding
             remaining = max(0, available_input - fixed)
             if overflow > 0:
-                trim_reasons.append("available_input_below_minimum_system_query")
+                fitted, query_tokens = self._truncate_to_token_budget(
+                    question,
+                    max_tokens=max(
+                        _MIN_QUESTION_TOKENS,
+                        available_input - system_tokens - prompt_system_dup - scaffolding,
+                    ),
+                )
+                if fitted != question:
+                    question = fitted
+                    trim_reasons.append("question_truncated_to_fit_context")
+                fixed = system_tokens + prompt_system_dup + query_tokens + scaffolding
+                remaining = available_input - fixed
+                overflow = max(0, -remaining)
+                remaining = max(0, remaining)
+                if overflow > 0:
+                    trim_reasons.append("available_input_below_minimum_system_query")
+                    raise TokenBudgetExceeded(
+                        "This question is too large for the model's context "
+                        "window after reserving space for the answer. "
+                        "Please shorten the message and try again."
+                    )
 
         # Mode-aware evidence preference: document Q&A prioritizes matter/conversation.
         legal_cap = min(limits.max_legal_evidence_tokens, remaining)
@@ -367,7 +411,9 @@ class TokenBudgetManager:
             budget_trimmed=budget_trimmed,
             trimming_reason=trimming_reason,
             tokenizer_id=self.counter.tokenizer_id,
-            tokenizer_exact=self.counter.is_exact,
+            tokenizer_exact=bool(
+                self.counter.is_exact and caps.tokenizer_native
+            ),
             documents_retained=len(docs),
             chunks_retained=len(packed_chunks),
             chunks_dropped=max(0, len(chunks) - len(packed_chunks)),
@@ -397,6 +443,7 @@ class TokenBudgetManager:
             active_legal_context=active_ctx,
             reserved_output_tokens=reserved,
             metadata=metadata,
+            question=question,
         )
 
     def ensure_prompt_within_budget(
@@ -418,7 +465,7 @@ class TokenBudgetManager:
         )
         system_text = system_prompt if system_prompt is not None else LEGAL_SYSTEM_PROMPT
         total = self.counter.count(system_text) + self.counter.count(prompt)
-        if total <= available or not packed.chunks:
+        if total <= available:
             if packed.metadata:
                 packed.metadata.input_tokens = total
                 packed.metadata.total_tokens = total + reserved
@@ -432,35 +479,66 @@ class TokenBudgetManager:
                     )
             return packed
 
-        overflow = total - available
-        chunks, dropped = self._drop_lowest_until(packed.chunks, overflow=overflow)
-        packed.chunks = chunks
-        if packed.metadata:
-            packed.metadata.budget_trimmed = True
-            reason = f"post_build_trim_dropped_{dropped}"
-            packed.metadata.trimming_reason = (
-                f"{packed.metadata.trimming_reason}; {reason}"
-                if packed.metadata.trimming_reason
-                else reason
-            )
-            packed.metadata.chunks_retained = len(chunks)
-            packed.metadata.chunks_dropped += dropped
-            packed.metadata.input_tokens = min(available, total - overflow)
-            packed.metadata.total_tokens = (
-                packed.metadata.input_tokens + reserved
-            )
-            packed.metadata.remaining_input_tokens = max(
-                0,
-                available - packed.metadata.input_tokens,
-            )
-            if self.capabilities.context_window > 0:
-                packed.metadata.usage_percent = round(
-                    100.0
-                    * packed.metadata.total_tokens
-                    / self.capabilities.context_window,
-                    2,
+        if packed.chunks:
+            overflow = total - available
+            chunks, dropped = self._drop_lowest_until(packed.chunks, overflow=overflow)
+            packed.chunks = chunks
+            if packed.metadata:
+                packed.metadata.budget_trimmed = True
+                reason = f"post_build_trim_dropped_{dropped}"
+                packed.metadata.trimming_reason = (
+                    f"{packed.metadata.trimming_reason}; {reason}"
+                    if packed.metadata.trimming_reason
+                    else reason
                 )
-        return packed
+                packed.metadata.chunks_retained = len(chunks)
+                packed.metadata.chunks_dropped += dropped
+                packed.metadata.input_tokens = min(available, total - overflow)
+                packed.metadata.total_tokens = (
+                    packed.metadata.input_tokens + reserved
+                )
+                packed.metadata.remaining_input_tokens = max(
+                    0,
+                    available - packed.metadata.input_tokens,
+                )
+                if self.capabilities.context_window > 0:
+                    packed.metadata.usage_percent = round(
+                        100.0
+                        * packed.metadata.total_tokens
+                        / self.capabilities.context_window,
+                        2,
+                    )
+            return packed
+
+        raise TokenBudgetExceeded(
+            "The assembled prompt exceeds the model context window. "
+            "Please shorten the question and try again."
+        )
+
+    def _truncate_to_token_budget(
+        self,
+        text: str,
+        *,
+        max_tokens: int,
+    ) -> tuple[str, int]:
+        """Keep the start of the user question; never drop the system prompt."""
+        current = self.counter.count(text)
+        if max_tokens < 1:
+            return text, current
+        if current <= max_tokens:
+            return text, current
+        lo, hi = 0, len(text)
+        fitted = ""
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = text[:mid].rstrip()
+            tokens = self.counter.count(candidate)
+            if tokens <= max_tokens:
+                fitted = candidate
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return fitted, self.counter.count(fitted)
 
     def _drop_lowest_until(
         self,

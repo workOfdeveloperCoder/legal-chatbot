@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 
 from fastapi import HTTPException, status
@@ -74,6 +75,8 @@ class ChatService:
         *,
         user: User,
         payload: ChatRequest,
+        token_callback=None,
+        started_callback=None,
     ) -> ChatResponse:
 
         logger.info(
@@ -95,9 +98,15 @@ class ChatService:
 
         # Attach matter when client uploads to a matter after chat started
         if conversation.matter_id is None and payload.matter_id is not None:
+            await self._require_matter_access(user=user, matter_id=payload.matter_id)
             conversation.matter_id = payload.matter_id
             await self._conversation.db.commit()
             await self._conversation.db.refresh(conversation)
+
+        if started_callback is not None:
+            maybe = started_callback(conversation)
+            if inspect.isawaitable(maybe):
+                await maybe
 
         matter_id = (
             str(conversation.matter_id)
@@ -165,6 +174,7 @@ class ChatService:
             conversation_id=conversation_id,
             document_id=document_id,
             query_plan=plan,
+            token_callback=token_callback,
         )
 
         answer = result["answer"]
@@ -176,6 +186,7 @@ class ChatService:
             prompt_tokens=result.get("prompt_tokens"),
             completion_tokens=result.get("completion_tokens"),
             total_tokens=result.get("total_tokens"),
+            save_user=not payload.regenerate,
         )
 
         try:
@@ -238,6 +249,106 @@ class ChatService:
                 ),
             ),
         )
+
+    async def chat_stream(
+        self,
+        *,
+        user: User,
+        payload: ChatRequest,
+    ):
+        """Yield SSE-ready dicts: started, token, complete, error."""
+        import asyncio
+
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def on_started(conversation) -> None:
+            await queue.put(
+                {
+                    "event": "started",
+                    "conversation_id": str(conversation.id),
+                }
+            )
+
+        async def on_token(piece: str) -> None:
+            await queue.put({"event": "token", "text": piece})
+
+        async def run() -> None:
+            try:
+                response = await self.chat(
+                    user=user,
+                    payload=payload,
+                    token_callback=on_token,
+                    started_callback=on_started,
+                )
+                await queue.put(
+                    {
+                        "event": "complete",
+                        "conversation_id": str(response.conversation_id),
+                        "response": response.response,
+                        "citations": [
+                            item.model_dump() for item in response.citations
+                        ],
+                        "sources": [
+                            item.model_dump() for item in response.sources
+                        ],
+                        "resources": [
+                            item.model_dump() for item in response.resources
+                        ],
+                        "grounding_status": response.grounding_status,
+                        "token_usage": (
+                            response.token_usage.model_dump()
+                            if response.token_usage
+                            else None
+                        ),
+                    }
+                )
+            except HTTPException as exc:
+                await queue.put(
+                    {
+                        "event": "error",
+                        "status": exc.status_code,
+                        "detail": exc.detail,
+                    }
+                )
+            except Exception:
+                logger.exception("Streaming chat failed")
+                await queue.put(
+                    {
+                        "event": "error",
+                        "status": 503,
+                        "detail": "The assistant is temporarily unavailable.",
+                    }
+                )
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(run())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _require_matter_access(self, *, user: User, matter_id) -> None:
+        matter = await self._conversation.matters.get(matter_id)
+        if matter is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Matter not found.",
+            )
+        if matter.owner_id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to access this matter.",
+            )
 
     async def _verify_document_access(
         self,

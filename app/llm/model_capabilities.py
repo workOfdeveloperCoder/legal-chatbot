@@ -22,6 +22,8 @@ class ModelCapabilities:
     supports_temperature: bool = True
     uses_max_completion_tokens: bool = False
     timeout_seconds: int | None = None
+    # False when counting uses a stand-in encoding (e.g. Gemini via cl100k).
+    tokenizer_native: bool = True
 
     @property
     def has_pricing(self) -> bool:
@@ -163,6 +165,7 @@ _MODEL_PROFILES: dict[str, ModelCapabilities] = {
         input_price_per_1m=0.10,
         output_price_per_1m=0.40,
         returns_usage=True,
+        tokenizer_native=False,
     ),
     "gemini-3.6-flash": ModelCapabilities(
         model_name="gemini-3.6-flash",
@@ -173,6 +176,7 @@ _MODEL_PROFILES: dict[str, ModelCapabilities] = {
         input_price_per_1m=0.10,
         output_price_per_1m=0.40,
         returns_usage=True,
+        tokenizer_native=False,
     ),
     "o4-mini": ModelCapabilities(
         model_name="o4-mini",
@@ -256,6 +260,7 @@ class ModelCapabilityRegistry:
                 or is_online_provider(provider_name),
                 uses_max_completion_tokens=model.lower().startswith("o"),
                 supports_temperature=not model.lower().startswith("o"),
+                tokenizer_native=provider_name != "gemini",
             )
             known = False
         else:
@@ -284,6 +289,10 @@ class ModelCapabilityRegistry:
             or "cl100k_base"
         )
 
+        tokenizer_native = (
+            False if provider_name == "gemini" else profile.tokenizer_native
+        )
+
         return ModelCapabilities(
             model_name=model,
             provider=provider_name,
@@ -297,6 +306,7 @@ class ModelCapabilityRegistry:
             supports_temperature=profile.supports_temperature,
             uses_max_completion_tokens=profile.uses_max_completion_tokens,
             timeout_seconds=profile.timeout_seconds,
+            tokenizer_native=tokenizer_native,
         )
 
     @classmethod
