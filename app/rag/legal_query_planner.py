@@ -16,6 +16,11 @@ class AnswerMode(str, Enum):
     GENERAL_LEGAL_QA = "general_legal_qa"
     SUMMARIZATION = "summarization"
     DRAFTING = "drafting"
+    HEARING_PREP = "hearing_prep"
+    COMPARE_PROVISIONS = "compare_provisions"
+    REVIEW_TABLE = "review_table"
+    PLAYBOOK_REVIEW = "playbook_review"
+    REDLINE = "redline"
     GENERAL_CHAT = "general_chat"
 
 
@@ -51,6 +56,8 @@ class LegalQueryPlan:
     document_id: str | None = None
     confidence: float = 0.0
     reason: str = ""
+    web_search: bool = False
+    quick_action: str | None = None
 
     def to_metadata(self) -> dict[str, object]:
         return {
@@ -73,6 +80,8 @@ class LegalQueryPlan:
             "document_id": self.document_id,
             "confidence": self.confidence,
             "reason": self.reason,
+            "web_search": self.web_search,
+            "quick_action": self.quick_action,
         }
 
 
@@ -134,19 +143,39 @@ class LegalQueryPlanner:
         matter_id: str | None = None,
         conversation_id: str | None = None,
         history: list[Message] | None = None,
+        quick_action: str | int | None = None,
+        web_search: bool = False,
     ) -> LegalQueryPlan:
+        from app.services.quick_actions import (
+            resolve_from_message,
+            resolve_quick_action,
+        )
+
+        action = resolve_quick_action(quick_action) or resolve_from_message(
+            question
+        )
         route = await self._router.route(
             question,
             has_uploaded_documents=has_uploaded_documents,
+            quick_action=quick_action,
         )
         task = route.task
 
         # Explicit document scope: keep mixed analysis if user asks for law check.
-        if document_id and task not in {
-            Task.SUMMARIZATION,
-            Task.DOCUMENT_QA,
-            Task.MIXED_QA,
-        }:
+        # Quick actions keep their own workflow even when a file is attached.
+        if (
+            document_id
+            and action is None
+            and task not in {
+                Task.SUMMARIZATION,
+                Task.DOCUMENT_QA,
+                Task.MIXED_QA,
+                Task.CONTRACT_REVIEW,
+                Task.REVIEW_TABLE,
+                Task.PLAYBOOK_REVIEW,
+                Task.REDLINE,
+            }
+        ):
             task = Task.DOCUMENT_QA
 
         answer_mode = self._answer_mode(task, has_uploaded_documents=has_uploaded_documents)
@@ -158,15 +187,23 @@ class LegalQueryPlanner:
         uploaded_primary = answer_mode in {
             AnswerMode.DOCUMENT_QA,
             AnswerMode.SUMMARIZATION,
+            AnswerMode.REVIEW_TABLE,
+            AnswerMode.PLAYBOOK_REVIEW,
+            AnswerMode.REDLINE,
         }
         requires_authority = answer_mode in {
             AnswerMode.LEGAL_RESEARCH,
             AnswerMode.MIXED_LEGAL_ANALYSIS,
             AnswerMode.GENERAL_LEGAL_QA,
+            AnswerMode.HEARING_PREP,
+            AnswerMode.COMPARE_PROVISIONS,
         }
         document_scoped = bool(document_id) and answer_mode in {
             AnswerMode.DOCUMENT_QA,
             AnswerMode.SUMMARIZATION,
+            AnswerMode.REVIEW_TABLE,
+            AnswerMode.PLAYBOOK_REVIEW,
+            AnswerMode.REDLINE,
         }
 
         follow_up = bool(history) and len(question.split()) <= 12
@@ -185,6 +222,12 @@ class LegalQueryPlanner:
         entities = self._extract_entities(question)
         legal_area = self._detect_legal_area(question)
         jurisdiction = self._detect_jurisdiction(question)
+
+        use_web = bool(web_search)
+        if document_scoped and not web_search:
+            use_web = False
+        if use_web and retrieval_strategy == RetrievalStrategy.NONE:
+            retrieval_strategy = RetrievalStrategy.LEGAL_FIRST
 
         return LegalQueryPlan(
             original_question=question,
@@ -207,6 +250,8 @@ class LegalQueryPlanner:
             document_id=document_id,
             confidence=route.confidence,
             reason=route.reason,
+            web_search=use_web,
+            quick_action=action.slug if action else None,
         )
 
     @staticmethod
@@ -221,8 +266,19 @@ class LegalQueryPlanner:
             Task.LEGAL_NOTICE,
             Task.PLAINT,
             Task.CONTRACT_REVIEW,
+            Task.DOCUMENT_DRAFT,
         }:
             return AnswerMode.DRAFTING
+        if task == Task.HEARING_PREP:
+            return AnswerMode.HEARING_PREP
+        if task == Task.COMPARE_PROVISIONS:
+            return AnswerMode.COMPARE_PROVISIONS
+        if task == Task.REVIEW_TABLE:
+            return AnswerMode.REVIEW_TABLE
+        if task == Task.PLAYBOOK_REVIEW:
+            return AnswerMode.PLAYBOOK_REVIEW
+        if task == Task.REDLINE:
+            return AnswerMode.REDLINE
         if task in {
             Task.LEGAL_QA,
             Task.CASE_SEARCH,
@@ -253,6 +309,13 @@ class LegalQueryPlanner:
         if answer_mode in {AnswerMode.DOCUMENT_QA, AnswerMode.SUMMARIZATION}:
             return RetrievalStrategy.PRIVATE_DOCS_FIRST
         if answer_mode == AnswerMode.GENERAL_CHAT:
+            return RetrievalStrategy.NONE
+        if answer_mode == AnswerMode.REVIEW_TABLE:
+            return RetrievalStrategy.NONE
+        if answer_mode in {
+            AnswerMode.PLAYBOOK_REVIEW,
+            AnswerMode.REDLINE,
+        }:
             return RetrievalStrategy.NONE
         return RetrievalStrategy.LEGAL_FIRST
 
@@ -295,6 +358,8 @@ class LegalQueryPlanner:
         for key, value in mapping.items():
             if key in lower:
                 found.append(value)
+        if re.search(r"\b54[\s\-]?c\b", lower) and "Electricity Act, 1910" not in found:
+            found.append("Electricity Act, 1910")
         return found
 
     @staticmethod

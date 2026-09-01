@@ -1,0 +1,12 @@
+This Services Agreement is made on 1 March 2025 between
+Acme Private Limited ("Client") and Beta Counsel ("Counsel").
+This Agreement shall be governed by the laws of Pakistan.
+Liability of Counsel is capped at PKR 1,000,000.
+Either party may terminate on 30 days written notice.
+Confidential information shall not be disclosed for 3 years.
+The term of this Agreement is 24 months from the Effective Date.
+Disputes shall be resolved by arbitration in Karachi.
+Payment is due within 30 days of invoice.
+Indemnity: Counsel shall indemnify Client against third-party IP claims.
+Renewal is automatic for successive 12-month periods unless notice is given.
+Assignment requires prior written consent of the other party.

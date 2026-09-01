@@ -16,6 +16,7 @@ class TokenBudgetLimits:
     max_legal_evidence_tokens: int
     max_matter_evidence_tokens: int
     max_conversation_document_tokens: int
+    max_web_evidence_tokens: int = 1800
     scaffolding_overhead_tokens: int = 600
     token_counting_enabled: bool = True
     cost_tracking_enabled: bool = True
@@ -36,6 +37,7 @@ class TokenUsageMetadata:
     legal_evidence_tokens: int = 0
     conversation_evidence_tokens: int = 0
     matter_evidence_tokens: int = 0
+    web_evidence_tokens: int = 0
     reserved_output_tokens: int = 0
     safety_margin_tokens: int = 0
     scaffolding_tokens: int = 0
@@ -68,6 +70,7 @@ class TokenUsageMetadata:
             "legal_evidence_tokens": self.legal_evidence_tokens,
             "conversation_evidence_tokens": self.conversation_evidence_tokens,
             "matter_evidence_tokens": self.matter_evidence_tokens,
+            "web_evidence_tokens": self.web_evidence_tokens,
             "reserved_output_tokens": self.reserved_output_tokens,
             "safety_margin_tokens": self.safety_margin_tokens,
             "scaffolding_tokens": self.scaffolding_tokens,

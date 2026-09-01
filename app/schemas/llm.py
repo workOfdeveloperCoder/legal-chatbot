@@ -15,6 +15,8 @@ class ChatCompletionRequest(BaseModel):
 
     max_tokens: int = 2048
 
+    json_mode: bool = False
+
 
 class ChatCompletionResponse(BaseModel):
     content: str

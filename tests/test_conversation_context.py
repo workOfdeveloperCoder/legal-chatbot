@@ -43,3 +43,24 @@ def test_followup_retains_section_54c_context():
     lower = resolved.lower()
     assert "double jeopardy" in lower
     assert "54" in lower or "section" in lower
+
+
+def test_what_is_this_followup_resolves_prior_topic():
+    history = [
+        Message(role="user", content="what is meant by sections and articles"),
+        Message(
+            role="assistant",
+            content="Sections and articles organize statutes into numbered units.",
+        ),
+    ]
+    resolver = ContextResolver()
+    active = resolver.build_active_context("what is this", history=history)
+    resolved = resolver.resolve(
+        "what is this",
+        history=history,
+        active_context=active,
+    )
+    lower = resolved.lower()
+    assert "what is this" not in lower or "context of" in lower or "explain" in lower
+    assert "section" in lower or "article" in lower
+    assert "pakistan" in lower

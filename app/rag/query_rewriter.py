@@ -50,6 +50,26 @@ class QueryRewriter(BaseQueryRewriter):
         "cp": "Constitution Petition",
     }
 
+    # Bare section cites that usually imply a specific Pakistani statute.
+    SECTION_EXPANSIONS = (
+        (
+            re.compile(r"\b(?:section|sec\.?|u/s)\s*54[\s\-]?c\b", re.I),
+            "Electricity Act 1910 section 54-C theft of electricity",
+        ),
+        (
+            re.compile(r"\b54c\b", re.I),
+            "Electricity Act 1910 section 54-C theft of electricity",
+        ),
+        (
+            re.compile(r"\b(?:section|sec\.?|u/s)\s*144\b", re.I),
+            "Code of Criminal Procedure section 144",
+        ),
+        (
+            re.compile(r"\b(?:section|sec\.?|u/s)\s*491\b", re.I),
+            "Code of Criminal Procedure section 491 habeas corpus",
+        ),
+    )
+
     COURTS = [
         "supreme court",
         "lahore high court",
@@ -90,6 +110,7 @@ class QueryRewriter(BaseQueryRewriter):
         used_context = resolved.strip().lower() != original.strip().lower()
 
         query = self._expand_abbreviations(resolved)
+        query = self._expand_section_aliases(query)
         query = self._enrich_multilingual_legal_terms(query)
         filters = self._extract_filters(query)
         legal_terms = self._extract_legal_terms(query)
@@ -118,6 +139,20 @@ class QueryRewriter(BaseQueryRewriter):
                 flags=re.IGNORECASE,
             )
         return query
+
+    def _expand_section_aliases(self, query: str) -> str:
+        extras: list[str] = []
+        seen: set[str] = set()
+        for pattern, expansion in self.SECTION_EXPANSIONS:
+            key = expansion.lower()
+            if key in seen or key in query.lower():
+                continue
+            if pattern.search(query):
+                extras.append(expansion)
+                seen.add(key)
+        if not extras:
+            return query
+        return f"{query} {' '.join(extras)}"
 
     def _enrich_multilingual_legal_terms(self, query: str) -> str:
         """
@@ -230,9 +265,25 @@ class QueryRewriter(BaseQueryRewriter):
             "legal_notice": (
                 "formal notice demand notice legal communication"
             ),
+            "document_draft": (
+                "legal draft format parties facts relief prayer"
+            ),
+            "hearing_prep": (
+                "hearing issues oral submissions authorities objections"
+            ),
+            "compare_provisions": (
+                "compare sections articles provisions difference"
+            ),
+            "contract_review": (
+                "contract clause risk obligation termination liability"
+            ),
+            "summarization": (
+                "key points summary issues parties"
+            ),
         }
 
-        if task in enrichment:
-            return f"{query} {enrichment[task]}"
+        task_name = task.value if hasattr(task, "value") else str(task or "")
+        if task_name in enrichment:
+            return f"{query} {enrichment[task_name]}"
 
         return query

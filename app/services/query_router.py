@@ -17,6 +17,12 @@ class Task(str, Enum):
     DOCUMENT_QA = "document_qa"
     SUMMARIZATION = "summarization"
     MIXED_QA = "mixed_qa"
+    DOCUMENT_DRAFT = "document_draft"
+    HEARING_PREP = "hearing_prep"
+    COMPARE_PROVISIONS = "compare_provisions"
+    REVIEW_TABLE = "review_table"
+    PLAYBOOK_REVIEW = "playbook_review"
+    REDLINE = "redline"
     GENERAL_CHAT = "general_chat"
 
 
@@ -25,6 +31,7 @@ class RouteResult:
     task: Task
     confidence: float
     reason: str
+    web_search: bool = False
 
 
 class QueryRouter:
@@ -55,6 +62,39 @@ class QueryRouter:
         "prepare plaint",
     }
 
+    REVIEW_TABLE_KEYWORDS = {
+        "review table",
+        "diligence table",
+        "extraction table",
+        "extract clauses from all",
+        "across all documents",
+        "across all contracts",
+        "compare all contracts",
+        "compare these contracts",
+        "vault review",
+    }
+
+    PLAYBOOK_KEYWORDS = {
+        "playbook review",
+        "run playbook",
+        "apply playbook",
+        "against playbook",
+        "playbook check",
+        "score against playbook",
+        "off-playbook",
+        "off playbook",
+    }
+
+    REDLINE_KEYWORDS = {
+        "redline",
+        "red line",
+        "show redline",
+        "compare drafts",
+        "compare versions",
+        "diff the contracts",
+        "markup the contract",
+    }
+
     CONTRACT_KEYWORDS = {
         "contract",
         "agreement",
@@ -67,6 +107,9 @@ class QueryRouter:
         "contract analysis",
         "agreement review",
         "agreement analysis",
+        "extract clauses",
+        "clause extraction",
+        "key terms",
     }
 
     CASE_ANALYSIS_KEYWORDS = {
@@ -178,6 +221,59 @@ class QueryRouter:
         "under the law",
     }
 
+    DRAFT_KEYWORDS = {
+        "draft a",
+        "draft the",
+        "drafting",
+        "prepare a document",
+        "prepare document",
+        "write a notice",
+        "write a plaint",
+        "write an affidavit",
+        "draft the document",
+    }
+
+    HEARING_KEYWORDS = {
+        "prepare for hearing",
+        "hearing note",
+        "hearing notes",
+        "oral submissions",
+        "arguments for hearing",
+        "prepare arguments",
+        "court hearing",
+        "hearing preparation",
+    }
+
+    COMPARE_KEYWORDS = {
+        "compare section",
+        "compare article",
+        "compare provisions",
+        "compare the provisions",
+        "compare legal provisions",
+        "compare laws",
+        "side by side",
+        "difference between section",
+        "distinction between section",
+    }
+
+    WEB_SEARCH_KEYWORDS = {
+        "search the internet",
+        "search internet",
+        "search online",
+        "search the web",
+        "web search",
+        "look online",
+        "look it up online",
+        "from the internet",
+        "on the internet",
+        "google this",
+        "latest judgment",
+        "recent judgment",
+        "recent case law",
+        "current law",
+        "latest amendment",
+    }
+
     DOCUMENT_QA_KEYWORDS = {
         "this document",
         "uploaded document",
@@ -207,9 +303,46 @@ class QueryRouter:
         self,
         question: str,
         has_uploaded_documents: bool = False,
+        quick_action: str | int | None = None,
     ) -> RouteResult:
 
         q = self._normalize(question)
+        wants_web = self._wants_web_search(q)
+
+        forced = self._from_quick_action(quick_action)
+        if forced is None:
+            forced = self._from_quick_action(question)
+        if forced is not None:
+            return RouteResult(
+                task=self._task_from_name(forced.task),
+                confidence=0.99,
+                reason=f"quick action {forced.slug}",
+                web_search=wants_web or forced.enables_web_search,
+            )
+
+        if self._contains(q, self.REVIEW_TABLE_KEYWORDS):
+            return RouteResult(
+                Task.REVIEW_TABLE,
+                0.98,
+                "review table",
+                wants_web,
+            )
+
+        if self._contains(q, self.PLAYBOOK_KEYWORDS):
+            return RouteResult(
+                Task.PLAYBOOK_REVIEW,
+                0.98,
+                "playbook review",
+                wants_web,
+            )
+
+        if self._contains(q, self.REDLINE_KEYWORDS):
+            return RouteResult(
+                Task.REDLINE,
+                0.98,
+                "redline",
+                wants_web,
+            )
 
         if has_uploaded_documents:
             if self._contains(q, self.SUMMARY_KEYWORDS):
@@ -217,6 +350,7 @@ class QueryRouter:
                     task=Task.SUMMARIZATION,
                     confidence=0.99,
                     reason="uploaded document summary",
+                    web_search=wants_web,
                 )
 
             if self._is_mixed_legal_document_query(q):
@@ -224,6 +358,7 @@ class QueryRouter:
                     task=Task.MIXED_QA,
                     confidence=0.96,
                     reason="mixed document and legal authority",
+                    web_search=wants_web,
                 )
 
             if self._contains(q, self.DOCUMENT_QA_KEYWORDS):
@@ -231,6 +366,7 @@ class QueryRouter:
                     task=Task.DOCUMENT_QA,
                     confidence=0.99,
                     reason="document question",
+                    web_search=wants_web,
                 )
 
             if self._is_matter_document_content_query(q):
@@ -238,13 +374,31 @@ class QueryRouter:
                     task=Task.DOCUMENT_QA,
                     confidence=0.95,
                     reason="matter document content analysis",
+                    web_search=wants_web,
                 )
+
+        if self._contains(q, self.HEARING_KEYWORDS):
+            return RouteResult(
+                Task.HEARING_PREP,
+                0.98,
+                "hearing preparation",
+                wants_web,
+            )
+
+        if self._contains(q, self.COMPARE_KEYWORDS):
+            return RouteResult(
+                Task.COMPARE_PROVISIONS,
+                0.97,
+                "compare provisions",
+                True,
+            )
 
         if self._contains(q, self.LEGAL_NOTICE_KEYWORDS):
             return RouteResult(
                 Task.LEGAL_NOTICE,
                 0.98,
                 "legal notice keywords",
+                wants_web,
             )
 
         if self._contains(q, self.PLAINT_KEYWORDS):
@@ -252,6 +406,15 @@ class QueryRouter:
                 Task.PLAINT,
                 0.98,
                 "plaint keywords",
+                wants_web,
+            )
+
+        if self._contains(q, self.DRAFT_KEYWORDS) and not has_uploaded_documents:
+            return RouteResult(
+                Task.DOCUMENT_DRAFT,
+                0.96,
+                "document drafting",
+                wants_web,
             )
 
         if self._contains(q, self.CONTRACT_KEYWORDS):
@@ -259,6 +422,7 @@ class QueryRouter:
                 Task.CONTRACT_REVIEW,
                 0.97,
                 "contract keywords",
+                wants_web,
             )
 
         if self._contains(q, self.CASE_ANALYSIS_KEYWORDS):
@@ -266,6 +430,7 @@ class QueryRouter:
                 Task.CASE_ANALYSIS,
                 0.96,
                 "case analysis keywords",
+                wants_web,
             )
 
         if self._contains(q, self.CASE_SEARCH_KEYWORDS):
@@ -273,6 +438,7 @@ class QueryRouter:
                 Task.CASE_SEARCH,
                 0.95,
                 "case law search",
+                wants_web,
             )
 
         if self._is_statute_query(q):
@@ -280,6 +446,7 @@ class QueryRouter:
                 Task.STATUTE_SEARCH,
                 0.94,
                 "statute lookup",
+                wants_web,
             )
 
         if self._looks_like_legal_question(q):
@@ -287,13 +454,39 @@ class QueryRouter:
                 Task.LEGAL_QA,
                 0.90,
                 "general legal question",
+                wants_web,
+            )
+
+        if wants_web:
+            return RouteResult(
+                Task.LEGAL_QA,
+                0.80,
+                "explicit internet search",
+                True,
             )
 
         return RouteResult(
             Task.GENERAL_CHAT,
             0.70,
             "fallback",
+            False,
         )
+
+    def _wants_web_search(self, text: str) -> bool:
+        return self._contains(text, self.WEB_SEARCH_KEYWORDS)
+
+    @staticmethod
+    def _from_quick_action(value: str | int | None):
+        from app.services.quick_actions import resolve_quick_action
+
+        return resolve_quick_action(value)
+
+    @staticmethod
+    def _task_from_name(name: str) -> Task:
+        try:
+            return Task(name)
+        except ValueError:
+            return Task.LEGAL_QA
 
     @staticmethod
     def _normalize(text: str) -> str:

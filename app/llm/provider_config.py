@@ -70,8 +70,9 @@ _PROVIDER_DEFAULT_URLS: dict[str, str] = {
     "fireworks": "https://api.fireworks.ai/inference/v1",
 }
 
-_LOCAL_TIMEOUT_SENTINEL = 1800
+_LOCAL_TIMEOUT_SENTINELS = frozenset({1800, 3600})
 _ONLINE_DEFAULT_TIMEOUT = 120
+_LOCAL_DEFAULT_TIMEOUT = 3600
 
 _LOCAL_HOST_MARKERS = ("localhost", "127.0.0.1", "0.0.0.0")
 
@@ -158,13 +159,16 @@ def nonempty_secret(value: str | None) -> str | None:
 def resolve_chat_model(provider: str | None, model: str | None) -> str:
     """
     Map leftover local Ollama tags onto the hosted model for that provider.
+
+    Ollama tags look like ``deepseek-r1:32b``. OpenRouter ids often contain
+    a colon too (``org/model:free``) — those must not be remapped.
     """
     name = normalize_provider(provider)
-    chosen = (model or "").strip()
+    chosen = (model or "").strip().strip('"').strip("'")
     if not chosen:
         return default_chat_model(name)
 
-    looks_local = ":" in chosen
+    looks_local = ":" in chosen and "/" not in chosen
     if not looks_local:
         return chosen
 
@@ -188,9 +192,16 @@ def effective_llm_timeout(
 ) -> int:
     if (
         is_online_provider(provider)
-        and configured_timeout == _LOCAL_TIMEOUT_SENTINEL
+        and configured_timeout in _LOCAL_TIMEOUT_SENTINELS
     ):
         return _ONLINE_DEFAULT_TIMEOUT
+    if not is_online_provider(provider) and (
+        configured_timeout <= _ONLINE_DEFAULT_TIMEOUT
+        or configured_timeout == 1800
+    ):
+        # Hosted .env (120s) or the old local default (1800s) is too short
+        # for DeepSeek R1 32B, which often thinks for many minutes.
+        return _LOCAL_DEFAULT_TIMEOUT
     return configured_timeout
 
 

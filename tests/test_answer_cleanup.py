@@ -54,3 +54,27 @@ def test_removes_trailing_bare_sources_label():
 def test_preserves_normal_answer():
     answer = "The problem is that section 54-C lacks clear guidance."
     assert clean_answer_for_display(answer) == answer
+
+
+def test_repairs_fragmented_words_from_stream_artifacts():
+    raw = (
+        "A nswe r:\n\n"
+        "Close rel ati ve s of a murder victi m ha ve the opt ion "
+        "t o file a pe titi on for le ave to app eal."
+    )
+    cleaned = clean_answer_for_display(raw)
+    assert "Answer" in cleaned
+    assert "relatives" in cleaned
+    assert "rel ati ve" not in cleaned
+    assert "victim" in cleaned
+    assert "have" in cleaned
+    assert "option" in cleaned
+    assert "to file a" in cleaned
+    assert "petition" in cleaned
+    assert "leave" in cleaned
+    assert "appeal" in cleaned
+
+
+def test_preserves_normal_short_words():
+    answer = "Close relatives of a murder victim have the option to file a petition."
+    assert clean_answer_for_display(answer) == answer

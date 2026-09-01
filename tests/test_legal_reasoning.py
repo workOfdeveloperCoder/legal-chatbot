@@ -20,7 +20,11 @@ from app.rag.evidence_assessment import (
 from app.rag.models import Message, RetrievedChunk, SourceType
 from app.rag.prompt_builder import PromptBuilder
 from app.rag.query_complexity import QueryComplexity, classify_query_complexity
-from app.rag.reasoning_cleanup import strip_reasoning_output
+from app.rag.reasoning_cleanup import (
+    ReasoningStreamFilter,
+    join_stream_text,
+    strip_reasoning_output,
+)
 
 
 def _chunk(**kwargs) -> RetrievedChunk:
@@ -198,6 +202,49 @@ class TestReasoningCleanup:
         raw = f"{think_open}Still reasoning..."
         cleaned = strip_reasoning_output(raw)
         assert cleaned == ""
+
+    def test_stream_filter_keeps_answer_when_think_tags_split(self):
+        think_open = chr(60) + "think" + chr(62)
+        think_close = chr(60) + "/" + "think" + chr(62)
+        filt = ReasoningStreamFilter()
+        visible = [
+            filt.feed(think_open[:3]),
+            filt.feed(think_open[3:] + "internal notes"),
+            filt.feed(think_close + "Section 54-C bars an injunction."),
+            filt.finish(),
+        ]
+        joined = "".join(visible)
+        assert "internal notes" not in joined
+        assert "Section 54-C bars an injunction." in joined
+
+    def test_join_stream_text_does_not_split_subword_crumbs(self):
+        # Blind space insertion used to turn BPE crumbs into "rel ati ve s".
+        assert join_stream_text(["rel", "ati", "ve", "s"]) == "relatives"
+
+    def test_join_stream_text_keeps_model_provided_spaces(self):
+        assert join_stream_text(["The ", "court ", "held"]) == "The court held"
+
+    def test_join_stream_text_spaces_before_capitalized_word(self):
+        assert join_stream_text(["held", "The"]) == "held The"
+
+    def test_join_stream_text_does_not_duplicate_existing_spaces(self):
+        assert join_stream_text(["The ", "court ", "held."]) == "The court held."
+
+    def test_join_stream_text_keeps_newlines_and_indent(self):
+        text = join_stream_text(["Short answer", "\n    ", "Section 54-C applies."])
+        assert "\n    Section 54-C applies." in text
+
+    def test_strip_reasoning_does_not_glue_words_across_think_tags(self):
+        think_open = chr(60) + "think" + chr(62)
+        think_close = chr(60) + "/" + "think" + chr(62)
+        cleaned = strip_reasoning_output(
+            f"The{think_open}hidden{think_close}court held."
+        )
+        assert "The court held." == cleaned
+
+    def test_strip_reasoning_preserves_indented_lines(self):
+        raw = "Short Answer\n    Section 54-C restricts discretion."
+        assert strip_reasoning_output(raw) == raw
 
 
 class TestFollowUpContext:

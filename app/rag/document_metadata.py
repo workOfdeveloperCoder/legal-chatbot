@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import re
+import uuid
 from pathlib import Path
 
 from app.models.document import Document
 from app.rag.document_identity import normalize_document_id, recover_document_id
 from app.rag.models import RetrievedChunk
+
+
+def _is_postgres_uuid(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        uuid.UUID(str(value).strip())
+        return True
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 
 _BYLINE_PATTERN = re.compile(
@@ -130,6 +141,8 @@ async def load_documents_for_chunks(
     documents: dict[str, Document] = {}
 
     for document_id in document_ids:
+        if not _is_postgres_uuid(document_id):
+            continue
         document = await repository.get_by_id(document_id)
         if document is not None:
             documents[normalize_document_id(str(document.id)) or str(document.id)] = document

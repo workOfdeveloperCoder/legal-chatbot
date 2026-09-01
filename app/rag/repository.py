@@ -98,6 +98,7 @@ class BaseRetriever(ABC):
         document_id: str | None = None,
         limit: int = 10,
         filters: dict[str, str] | None = None,
+        prefer_legal_corpus: bool = False,
     ) -> RetrievalOutcome:
         """
         Retrieve relevant RAG chunks.

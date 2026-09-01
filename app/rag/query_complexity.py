@@ -124,7 +124,16 @@ def classify_query_complexity(
         return QueryComplexity.RESEARCH
 
     task_name = task.value if hasattr(task, "value") else str(task or "")
-    if task_name in {"case_analysis", "mixed_qa", "contract_review"}:
+    if task_name in {
+        "case_analysis",
+        "mixed_qa",
+        "contract_review",
+        "hearing_prep",
+        "compare_provisions",
+        "review_table",
+        "playbook_review",
+        "redline",
+    }:
         return QueryComplexity.COMPLEX
 
     if len(lower.split()) <= 10 and concept_count <= 1:

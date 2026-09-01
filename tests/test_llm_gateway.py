@@ -132,5 +132,5 @@ async def test_generate_stream_default_yields_full_answer():
     gateway = LLMGateway(primary, max_retries=0, timeout_seconds=5)
     pieces: list[str] = []
     async for piece in gateway.generate_stream(_request()):
-        pieces.append(piece)
+        pieces.append(piece.text if hasattr(piece, "text") else piece)
     assert "".join(pieces) == "final answer only"

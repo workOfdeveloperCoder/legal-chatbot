@@ -114,6 +114,7 @@ class EvidenceEngine:
         document_task: bool = False,
         document_qa_mode: bool = False,
         requires_legal_authority: bool = True,
+        prefer_web: bool = False,
     ) -> EvidenceBundle:
         assessment = assess_evidence_for_question(
             chunks,
@@ -121,6 +122,7 @@ class EvidenceEngine:
             document_task=document_task,
             document_qa_mode=document_qa_mode,
             requires_legal_authority=requires_legal_authority,
+            prefer_web=prefer_web,
         )
 
         items: list[EvidenceItem] = []

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 import time
+from dataclasses import replace
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -20,6 +22,7 @@ from app.rag.models import (
     Memory,
     Message,
     RetrievalMetadata,
+    SourceType,
 )
 
 from app.rag.repository import BaseRetriever
@@ -31,8 +34,11 @@ from app.rag.legal_query_planner import (
     AnswerMode,
     LegalQueryPlan,
     LegalQueryPlanner,
+    RetrievalStrategy,
 )
-from app.rag.reasoning_pipeline import ReasoningPipeline
+from app.rag.reasoning_pipeline import GenerationResult, ReasoningPipeline
+
+from app.search.web_search import WebSearchService
 
 from app.services.response_formatter import ResponseFormatter
 
@@ -57,6 +63,18 @@ DOCUMENT_NOT_READY_DETAIL = (
     "The requested document could not be read or indexed. "
     "Please re-upload or process the document before asking "
     "questions about it."
+)
+
+RETRIEVAL_EMBEDDINGS_OFFLINE_NOTE = (
+    "**Library search unavailable.** Qdrant `legal_documents` uses 768-d nomic "
+    "vectors. Your embedding model must be nomic-compatible (remote Ollama, "
+    "Fireworks, or Nomic API). OpenRouter free chat still works.\n\n"
+)
+
+RETRIEVAL_EMBEDDING_MODEL_NOTE = (
+    "**Library search skipped.** The configured embedding model does not match "
+    "the nomic 768-d Qdrant index. Switch to a nomic embed provider for "
+    "corpus Resources, or use OpenRouter chat without library hits.\n\n"
 )
 
 
@@ -141,6 +159,7 @@ class RAGService:
         legal_query_planner: LegalQueryPlanner | None = None,
         token_budget_manager: TokenBudgetManager | None = None,
         firewall: LLMFirewall | None = None,
+        web_searcher: WebSearchService | None = None,
     ) -> None:
 
         self._llm = llm
@@ -151,6 +170,7 @@ class RAGService:
         self._answer_guard = answer_guard or AnswerGuard()
         self._documents = document_repository
         self._firewall = firewall or LLMFirewall()
+        self._web_search = web_searcher or WebSearchService()
         caps = _capabilities_from_llm(llm)
         self._profile = ExecutionProfile.for_capabilities(caps)
         self._reasoning = ReasoningPipeline(llm, profile=self._profile)
@@ -174,7 +194,9 @@ class RAGService:
         conversation_id: str | None = None,
         document_id: str | None = None,
         query_plan: LegalQueryPlan | None = None,
+        web_search: bool = False,
         token_callback=None,
+        thinking_callback=None,
     ) -> dict[str, Any]:
 
         t0 = time.perf_counter()
@@ -208,6 +230,7 @@ class RAGService:
                 matter_id=matter_id,
                 conversation_id=conversation_id,
                 history=history,
+                web_search=web_search,
             )
             if isinstance(task_obj, Task):
                 # Caller-selected task wins (ChatService sends a plan; tests may
@@ -232,6 +255,8 @@ class RAGService:
                         AnswerMode.LEGAL_RESEARCH,
                         AnswerMode.MIXED_LEGAL_ANALYSIS,
                         AnswerMode.GENERAL_LEGAL_QA,
+                        AnswerMode.HEARING_PREP,
+                        AnswerMode.COMPARE_PROVISIONS,
                     }
                     and not plan.uploaded_document_primary
                 )
@@ -241,6 +266,11 @@ class RAGService:
                 }
         else:
             task_obj = plan.task
+
+        if web_search:
+            plan.web_search = True
+            if plan.retrieval_strategy == RetrievalStrategy.NONE:
+                plan.retrieval_strategy = RetrievalStrategy.LEGAL_FIRST
 
         mixed_qa_mode = plan.answer_mode == AnswerMode.MIXED_LEGAL_ANALYSIS
         document_qa_mode = plan.answer_mode in {
@@ -318,7 +348,12 @@ class RAGService:
         search_query = rewrite.rewritten_query
         conversation_context = rewrite.active_context
 
+        prefer_legal_corpus = (
+            plan.retrieval_strategy == RetrievalStrategy.LEGAL_FIRST
+        )
+
         t_retrieve = time.perf_counter()
+        retrieval_unavailable = False
         try:
             retrieval = await self._retriever.search(
                 query=search_query,
@@ -329,9 +364,11 @@ class RAGService:
                 document_id=document_id,
                 limit=settings.RETRIEVAL_LIMIT,
                 filters=rewrite.filters,
+                prefer_legal_corpus=prefer_legal_corpus,
             )
         except Exception:
             logger.exception("Retrieval failed")
+            retrieval_unavailable = True
             if document_task:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -407,16 +444,84 @@ class RAGService:
                     detail=DOCUMENT_NOT_READY_DETAIL,
                 )
 
+        web_requested = bool(web_search)
+        should_web = self._should_run_web_search(
+            web_search=web_requested,
+            document_task=document_task,
+        )
+        if should_web:
+            t_web = time.perf_counter()
+            web_chunks = await self._retrieve_web(search_query)
+            perf["web_search_latency_ms"] = round(
+                (time.perf_counter() - t_web) * 1000,
+                2,
+            )
+            if web_chunks:
+                # Keep explicit web hits above evidence / packing floors.
+                for chunk in web_chunks:
+                    boosted = max(float(chunk.score or 0.0), 0.55)
+                    chunk.score = boosted
+                    chunk.relevance_score = max(
+                        float(chunk.relevance_score or 0.0),
+                        boosted,
+                    )
+                chunks = list(chunks) + web_chunks
+                retrieval_metadata.web_chunks = len(web_chunks)
+                if "web" not in retrieval_metadata.collections_queried:
+                    retrieval_metadata.collections_queried.append("web")
+                logger.info(
+                    "Web search returned hits=%s query=%r explicit=%s",
+                    len(web_chunks),
+                    (search_query or "")[:120],
+                    web_requested,
+                )
+            else:
+                if "web" not in retrieval_metadata.degraded_sources:
+                    retrieval_metadata.degraded_sources.append("web")
+                logger.warning(
+                    "Web search returned no hits query=%r explicit=%s",
+                    (search_query or "")[:120],
+                    web_requested,
+                )
+
+        if not web_requested:
+            chunks = self._response_formatter._without_web_chunks(chunks)
+            retrieval_metadata.web_chunks = 0
+            retrieval_metadata.collections_queried = [
+                name
+                for name in retrieval_metadata.collections_queried
+                if name != "web"
+            ]
+            retrieval_metadata.degraded_sources = [
+                name
+                for name in retrieval_metadata.degraded_sources
+                if name != "web"
+            ]
+
         evidence_bundle = self._evidence_engine.build(
             chunks,
             question=rewrite.resolved_query,
             document_task=document_task,
             document_qa_mode=document_qa_mode,
             requires_legal_authority=needs_legal_authority,
+            prefer_web=web_requested,
         )
         evidence_assessment = evidence_bundle.assessment
         evidence_strength = evidence_bundle.overall_strength
         chunks = evidence_bundle.chunks
+        if (
+            web_requested
+            and retrieval_metadata.web_chunks > 0
+            and evidence_strength == EvidenceStrength.NONE
+        ):
+            evidence_strength = EvidenceStrength.PARTIAL
+            if evidence_assessment is not None:
+                evidence_assessment = replace(
+                    evidence_assessment,
+                    overall_strength=EvidenceStrength.PARTIAL,
+                )
+                evidence_bundle.assessment = evidence_assessment
+                evidence_bundle.overall_strength = EvidenceStrength.PARTIAL
 
         logger.info(
             "Retrieved chunks=%s legal=%s conversation=%s matter=%s "
@@ -439,43 +544,108 @@ class RAGService:
             evidence_strength == EvidenceStrength.NONE
             and needs_legal_authority
             and not document_qa_mode
+            and not chunks
         ):
+            # Still call the LLM for in-scope legal questions. Lawyers need a
+            # usable answer even when the corpus/uploads miss the point — with
+            # an explicit "not document-grounded" disclaimer after generation.
             logger.info(
-                "Insufficient evidence; skipping LLM user=%s",
+                "No retrieved evidence; continuing with ungrounded legal "
+                "answer path user=%s",
                 user_id,
             )
-            insufficient_answer = (
-                self._answer_guard.build_insufficient_evidence_answer(
-                    evidence_strength=evidence_strength,
-                    has_private_sources=bool(chunks),
-                    language=language,
+
+        # Prefer polished LLM synthesis over dumping source text. Only enter
+        # document Q&A when private passages are actually about THIS question.
+        # Otherwise unrelated conversation uploads (e.g. "VOID ORDERS") hijack
+        # conceptual / web-backed answers like "what are sections and articles".
+        private_chunks = [
+            c
+            for c in chunks
+            if getattr(c, "source_type", None)
+            in {
+                SourceType.CONVERSATION.value,
+                SourceType.MATTER.value,
+            }
+        ]
+        legal_chunks = [
+            c
+            for c in chunks
+            if getattr(c, "source_type", None) == SourceType.LEGAL.value
+        ]
+        web_chunks_present = [
+            c
+            for c in chunks
+            if getattr(c, "source_type", None) == SourceType.WEB.value
+        ]
+
+        question_about_uploads = self._question_targets_uploaded_docs(
+            rewrite.resolved_query or question
+        )
+        relevant_private = [
+            c
+            for c in private_chunks
+            if self._chunk_matches_question(c, rewrite.resolved_query or question)
+        ]
+
+        if private_chunks and not document_task and not document_id:
+            # Library hits win for legal-research questions — conversation
+            # uploads must not hijack corpus passages (e.g. VOID ORDERS vs Cornelius).
+            if (
+                legal_chunks
+                and needs_legal_authority
+                and not question_about_uploads
+            ):
+                drop_ids = {id(c) for c in private_chunks}
+                chunks = [c for c in chunks if id(c) not in drop_ids]
+                private_chunks = []
+                logger.info(
+                    "Dropped %s private chunks; legal corpus preferred user=%s",
+                    len(drop_ids),
+                    user_id,
                 )
-            )
-            return self._finalize_response(
-                self._response_formatter.format(
-                    answer=insufficient_answer,
-                    chunks=chunks,
-                    retrieval_metadata=retrieval_metadata,
-                    degraded_sources=retrieval_metadata.degraded_sources,
-                    evidence_strength=evidence_strength,
-                    grounding_status=None,
-                    citation_validation=None,
-                    used_conversation_context=rewrite.used_conversation_context,
-                    query_plan=plan.to_metadata(),
-                    evidence_metadata=evidence_bundle.to_metadata(),
-                    token_budget=None,
-                    pipeline_versions=versions.to_dict(),
-                    performance={
-                        **perf,
-                        "total_latency_ms": round(
-                            (time.perf_counter() - t0) * 1000, 2
-                        ),
-                    },
-                    llm_execution=llm_execution,
-                    conversation_context=conversation_context,
-                    language=language_meta,
+            elif not question_about_uploads and not relevant_private:
+                drop_ids = {id(c) for c in private_chunks}
+                chunks = [c for c in chunks if id(c) not in drop_ids]
+                private_chunks = []
+                logger.info(
+                    "Dropped %s unrelated private chunks for conceptual/"
+                    "web question user=%s",
+                    len(drop_ids),
+                    user_id,
                 )
-            )
+            elif relevant_private and len(relevant_private) < len(private_chunks):
+                keep = {id(c) for c in relevant_private}
+                drop_n = len(private_chunks) - len(relevant_private)
+                chunks = [
+                    c
+                    for c in chunks
+                    if getattr(c, "source_type", None)
+                    not in {
+                        SourceType.CONVERSATION.value,
+                        SourceType.MATTER.value,
+                    }
+                    or id(c) in keep
+                ]
+                private_chunks = relevant_private
+                logger.info(
+                    "Kept %s relevant private chunks, dropped %s unrelated",
+                    len(relevant_private),
+                    drop_n,
+                )
+
+        if private_chunks and not document_task:
+            if web_requested and web_chunks_present:
+                # Web toggle wins over unrelated-doc summarization.
+                mixed_qa_mode = bool(legal_chunks or private_chunks)
+                document_qa_mode = False
+            elif legal_chunks:
+                mixed_qa_mode = True
+                document_qa_mode = False
+            elif question_about_uploads or relevant_private or document_id:
+                document_qa_mode = True
+            else:
+                document_qa_mode = False
 
         t_budget = time.perf_counter()
         try:
@@ -487,6 +657,7 @@ class RAGService:
                 system_prompt=self._profile.system_prompt,
                 document_qa_mode=document_qa_mode or document_task,
                 duplicate_system_in_user=self._profile.embed_system_in_user_prompt,
+                prefer_web=web_requested,
             )
         except TokenBudgetExceeded as exc:
             raise HTTPException(
@@ -514,6 +685,7 @@ class RAGService:
             complexity=complexity,
             packed=packed,
             language=language,
+            prefer_web=web_requested,
         )
 
         # Post-format safety: drop evidence if scaffolding pushed over budget.
@@ -544,6 +716,7 @@ class RAGService:
                 complexity=complexity,
                 packed=packed,
                 language=language,
+                prefer_web=web_requested,
             )
             token_budget_meta = (
                 packed.metadata.to_dict() if packed.metadata else token_budget_meta
@@ -555,10 +728,16 @@ class RAGService:
         perf["prompt_construction_latency_ms"] = perf["token_budget_latency_ms"]
 
         t_llm = time.perf_counter()
+        # Local R1 often stalls on streaming (thinking-only / proxy drops).
+        # For document-grounded answers, use non-stream generate then emit once.
+        prefer_nonstream = bool(document_qa_mode or mixed_qa_mode)
         try:
-            if token_callback is not None:
-                from app.rag.reasoning_cleanup import strip_reasoning_output
-                from app.rag.reasoning_pipeline import GenerationResult
+            if token_callback is not None and not prefer_nonstream:
+                from app.llm.delta import coerce_delta
+                from app.rag.reasoning_cleanup import (
+                    join_stream_text,
+                    strip_reasoning_output,
+                )
                 from app.schemas.llm import ChatCompletionRequest, ChatMessage
 
                 request = ChatCompletionRequest(
@@ -574,23 +753,89 @@ class RAGService:
                 )
                 pieces: list[str] = []
                 async for piece in self._llm.generate_stream(request):
-                    if not piece:
+                    delta = coerce_delta(piece)
+                    if not delta.text:
                         continue
-                    pieces.append(piece)
-                    maybe = token_callback(piece)
+                    if delta.kind == "thinking":
+                        if thinking_callback is not None:
+                            maybe = thinking_callback(delta.text)
+                            if inspect.isawaitable(maybe):
+                                await maybe
+                        continue
+                    pieces.append(delta.text)
+                    maybe = token_callback(delta.text)
                     if inspect.isawaitable(maybe):
                         await maybe
                 generation = GenerationResult(
-                    content=strip_reasoning_output("".join(pieces)),
+                    content=strip_reasoning_output(join_stream_text(pieces)),
                     two_stage=False,
                 )
+                if not (generation.content or "").strip():
+                    logger.warning(
+                        "Stream produced no visible answer; "
+                        "retrying non-stream generate user=%s",
+                        user_id,
+                    )
+                    try:
+                        generation = await self._reasoning.generate(
+                            user_prompt=prompt,
+                            complexity=complexity,
+                            temperature=settings.LLM_TEMPERATURE,
+                            max_tokens=max(
+                                packed.reserved_output_tokens,
+                                12288,
+                            ),
+                        )
+                    except (LLMAllProvidersFailed, LLMError) as exc:
+                        logger.warning(
+                            "Non-stream retry after empty stream failed: %s",
+                            exc,
+                        )
+                        generation = GenerationResult(
+                            content="",
+                            two_stage=False,
+                        )
             else:
                 generation = await self._reasoning.generate(
                     user_prompt=prompt,
                     complexity=complexity,
                     temperature=settings.LLM_TEMPERATURE,
-                    max_tokens=packed.reserved_output_tokens,
+                    max_tokens=max(
+                        packed.reserved_output_tokens,
+                        12288 if prefer_nonstream else packed.reserved_output_tokens,
+                    ),
                 )
+                if (
+                    token_callback is not None
+                    and (generation.content or "").strip()
+                ):
+                    maybe = token_callback(generation.content)
+                    if inspect.isawaitable(maybe):
+                        await maybe
+            if not (generation.content or "").strip():
+                logger.warning(
+                    "LLM returned blank content after retries user=%s "
+                    "chunks=%s",
+                    user_id,
+                    len(chunks),
+                )
+                if chunks:
+                    generation = GenerationResult(
+                        content=self._blank_llm_chunk_fallback(
+                            question=rewrite.resolved_query or question,
+                            chunks=chunks,
+                        ),
+                        two_stage=False,
+                    )
+                else:
+                    generation = GenerationResult(
+                        content=self._answer_guard.build_insufficient_evidence_answer(
+                            evidence_strength=evidence_strength,
+                            has_private_sources=False,
+                            language=language,
+                        ),
+                        two_stage=False,
+                    )
         except LLMCancelledError:
             raise HTTPException(
                 status_code=499,
@@ -599,13 +844,53 @@ class RAGService:
         except (LLMAllProvidersFailed, LLMError) as exc:
             logger.exception("LLM generation failed: %s", exc)
             llm_execution["error_type"] = type(exc).__name__
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    "The assistant is temporarily unavailable. "
-                    "Please try again shortly."
-                ),
-            )
+            detail = str(exc).strip()
+            # Prefer retrieved passages over a hard 503 when the model only
+            # spent tokens on hidden reasoning / timed out empty.
+            if chunks and (
+                "empty" in detail.lower()
+                or "reasoning" in detail.lower()
+                or "timeout" in detail.lower()
+            ):
+                logger.warning(
+                    "Using passage fallback after LLM failure user=%s",
+                    user_id,
+                )
+                generation = GenerationResult(
+                    content=self._blank_llm_chunk_fallback(
+                        question=rewrite.resolved_query or question,
+                        chunks=chunks,
+                    ),
+                    two_stage=False,
+                )
+            else:
+                if "empty" in detail.lower() or "timeout" in detail.lower():
+                    user_detail = (
+                        "The local language model did not finish in time "
+                        "(or returned only hidden reasoning). "
+                        "Wait a moment and try again — avoid running two "
+                        "chats against Ollama at once."
+                    )
+                elif "404" in detail or "bad request" in detail.lower():
+                    user_detail = (
+                        "The configured chat model is not available. "
+                        "Set OPENROUTER_MODEL or CHAT_MODEL to a model id "
+                        "your OpenRouter account can use."
+                    )
+                elif "429" in detail or "rate" in detail.lower():
+                    user_detail = (
+                        "The chat provider rate-limited this request. "
+                        "Wait a few seconds and try again."
+                    )
+                else:
+                    user_detail = (
+                        "The assistant is temporarily unavailable. "
+                        "Please try again shortly."
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=user_detail,
+                )
         except Exception:
             logger.exception("LLM generation failed")
             llm_execution["error_type"] = "unexpected"
@@ -682,6 +967,7 @@ class RAGService:
             llm_execution=llm_execution,
             conversation_context=conversation_context,
             language=language_meta,
+            include_web=web_requested,
         )
 
         guarded = self._answer_guard.process(
@@ -689,7 +975,10 @@ class RAGService:
             chunks=chunks,
             sources=preliminary["sources"],
             evidence_strength=evidence_strength,
-            skip_grounding=document_task,
+            skip_grounding=document_task
+            or (
+                evidence_strength == EvidenceStrength.NONE and not chunks
+            ),
             document_evidence_mode=document_qa_mode and not mixed_qa_mode,
             question=rewrite.resolved_query,
             has_conflicts=bool(
@@ -714,9 +1003,19 @@ class RAGService:
             perf["total_latency_ms"],
         )
 
+        final_answer = guarded.answer
+        if (
+            "qdrant_embedding_model" in retrieval_metadata.degraded_sources
+            and not chunks
+            and not web_requested
+        ):
+            final_answer = RETRIEVAL_EMBEDDING_MODEL_NOTE + final_answer
+        elif retrieval_unavailable and not web_requested and not chunks:
+            final_answer = RETRIEVAL_EMBEDDINGS_OFFLINE_NOTE + final_answer
+
         return self._finalize_response(
             self._response_formatter.format(
-                answer=guarded.answer,
+                answer=final_answer,
                 chunks=chunks,
                 prompt_tokens=generation.prompt_tokens,
                 completion_tokens=generation.completion_tokens,
@@ -737,8 +1036,194 @@ class RAGService:
                 llm_execution=llm_execution,
                 conversation_context=conversation_context,
                 language=language_meta,
+                include_web=web_requested,
             )
         )
+
+    @staticmethod
+    def _blank_llm_chunk_fallback(*, question: str, chunks: list) -> str:
+        """Last-resort when the model returns only hidden reasoning."""
+        titles: list[str] = []
+        for chunk in chunks[:4]:
+            title = (
+                getattr(chunk, "filename", None)
+                or getattr(chunk, "law_name", None)
+                or getattr(chunk, "title", None)
+            )
+            if title and str(title) not in titles:
+                titles.append(str(title))
+        title_bit = (
+            ", ".join(titles)
+            if titles
+            else "the retrieved resources listed below"
+        )
+        return (
+            f"I retrieved relevant material for **{question.strip()}** "
+            f"(including {title_bit}), but the local model did not return a "
+            "readable synthesized answer this time.\n\n"
+            "Please open the Resources below for the source passages, or "
+            "try the question again. Prefer a specific prompt such as "
+            "`section 54-C Electricity Act 1910` if the answer stays empty."
+        )
+
+    def _should_run_web_search(
+        self,
+        *,
+        web_search: bool,
+        document_task: bool = False,
+    ) -> bool:
+        """Internet search runs only when the client Web toggle is on."""
+        if not settings.WEB_SEARCH_ENABLED:
+            return False
+        if document_task and not web_search:
+            return False
+        return bool(web_search)
+
+    async def _retrieve_web(self, query: str) -> list:
+        try:
+            return await self._web_search.search_as_chunks(
+                query,
+                limit=settings.RETRIEVAL_WEB_LIMIT,
+            )
+        except Exception:
+            logger.exception("Web search failed")
+            return []
+
+    @staticmethod
+    def _question_targets_uploaded_docs(question: str) -> bool:
+        lower = (question or "").lower()
+        return bool(
+            re.search(
+                r"\b(?:this|the|my|uploaded|attached)\s+"
+                r"(?:document|doc|file|article|paper|pdf|upload)\b|"
+                r"\b(?:summarize|summary of|key (?:points|issues) in|"
+                r"according to (?:the )?(?:author|article|document)|"
+                r"what does (?:the )?(?:author|article|document))\b|"
+                r"\bvoid orders\b",
+                lower,
+            )
+        )
+
+    @staticmethod
+    def _chunk_matches_question(chunk, question: str) -> bool:
+        """Cheap lexical relevance so unrelated uploads don't dominate."""
+        text = " ".join(
+            part
+            for part in (
+                getattr(chunk, "text", None) or "",
+                getattr(chunk, "filename", None) or "",
+                getattr(chunk, "title", None) or "",
+                getattr(chunk, "display_name", None) or "",
+            )
+            if part
+        ).lower()
+        if not text:
+            return False
+
+        score = float(
+            getattr(chunk, "relevance_score", None)
+            or getattr(chunk, "score", None)
+            or 0.0
+        )
+
+        terms = [
+            t
+            for t in re.findall(r"[a-z0-9\-]{3,}", (question or "").lower())
+            if t
+            not in {
+                "the",
+                "and",
+                "for",
+                "what",
+                "with",
+                "from",
+                "this",
+                "that",
+                "are",
+                "is",
+                "law",
+                "legal",
+                "please",
+                "about",
+                "under",
+                "pakistan",
+                "pakistani",
+                "does",
+                "how",
+                "why",
+                "can",
+                "any",
+                "into",
+                "who",
+                "when",
+                "where",
+                "which",
+                "have",
+                "has",
+                "was",
+                "were",
+                "been",
+                "being",
+                "will",
+                "would",
+                "should",
+                "could",
+                "their",
+                "they",
+                "them",
+                "your",
+                "you",
+                "his",
+                "her",
+                "its",
+                "our",
+            }
+        ]
+        if not terms:
+            return score >= 0.70
+
+        generic_legal = {
+            "justice",
+            "government",
+            "independent",
+            "establish",
+            "established",
+            "primary",
+            "task",
+            "newly",
+            "identify",
+            "court",
+            "order",
+            "orders",
+            "section",
+            "sections",
+            "article",
+            "articles",
+            "act",
+            "statute",
+            "provision",
+            "provisions",
+            "judgment",
+            "judgement",
+            "case",
+            "lawyer",
+            "advocate",
+            "petition",
+            "appeal",
+            "bail",
+            "fir",
+            "crpc",
+            "cpc",
+            "ppc",
+        }
+        discriminative = [t for t in terms if t not in generic_legal]
+        if discriminative:
+            hits = sum(1 for term in discriminative if term in text)
+            required = max(1, min(2, (len(discriminative) + 1) // 2))
+            return hits >= required
+
+        hits = sum(1 for term in terms if term in text)
+        return hits >= max(2, (len(terms) + 2) // 3)
 
     def _format_user_prompt(
         self,
@@ -756,6 +1241,7 @@ class RAGService:
         complexity,
         packed,
         language,
+        prefer_web: bool = False,
     ) -> str:
         return self._prompt_builder.build(
             question=question,
@@ -776,10 +1262,26 @@ class RAGService:
             language=language,
             include_system_in_user=self._profile.embed_system_in_user_prompt,
             compact=self._profile.compact_prompts,
+            prefer_web=prefer_web,
         )
 
     @staticmethod
     def _finalize_response(payload: dict[str, Any]) -> dict[str, Any]:
         """Strip LLM source markers from answer text for API display."""
-        payload["answer"] = clean_answer_for_display(payload.get("answer", ""))
+        raw = payload.get("answer", "") or ""
+        cleaned = clean_answer_for_display(raw)
+        if not cleaned.strip():
+            # Never ship an empty bubble (e.g. answer was only [Source N] markers).
+            cleaned = (
+                "No visible answer text remained after cleanup. "
+                "Check Resources below for retrieved passages, or try again "
+                "with a more specific question "
+                "(for example: `section 54-C Electricity Act 1910`)."
+                if raw.strip()
+                else (
+                    "No visible answer was returned. Check Resources below "
+                    "if any passages were retrieved, or try again."
+                )
+            )
+        payload["answer"] = cleaned
         return payload

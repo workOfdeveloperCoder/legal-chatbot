@@ -50,6 +50,11 @@ class ExecutionProfile:
             max_legal_evidence_tokens=self.max_legal_evidence_tokens,
             max_matter_evidence_tokens=self.max_matter_evidence_tokens,
             max_conversation_document_tokens=self.max_conversation_document_tokens,
+            max_web_evidence_tokens=(
+                settings.TOKEN_ONLINE_MAX_WEB_EVIDENCE_TOKENS
+                if self.compact_prompts
+                else settings.TOKEN_MAX_WEB_EVIDENCE_TOKENS
+            ),
             scaffolding_overhead_tokens=self.scaffolding_overhead_tokens,
             token_counting_enabled=settings.TOKEN_COUNTING_ENABLED,
             cost_tracking_enabled=settings.TOKEN_COST_TRACKING_ENABLED,

@@ -83,6 +83,7 @@ def assess_evidence_for_question(
     document_task: bool = False,
     document_qa_mode: bool = False,
     requires_legal_authority: bool = True,
+    prefer_web: bool = False,
 ) -> EvidenceAssessment:
     concepts = tuple(extract_question_concepts(question))
     corpus = _build_corpus(chunks)
@@ -110,6 +111,7 @@ def assess_evidence_for_question(
         coverage=coverage,
         source_quality=source_quality,
         concept_count=len(concepts),
+        prefer_web=prefer_web,
     )
 
     return EvidenceAssessment(
@@ -185,6 +187,7 @@ def _derive_overall_strength(
     coverage: float,
     source_quality: float,
     concept_count: int,
+    prefer_web: bool = False,
 ) -> EvidenceStrength:
     if not chunks:
         return EvidenceStrength.NONE
@@ -195,12 +198,23 @@ def _derive_overall_strength(
         + coverage * 0.25
         + source_quality * 0.10
     )
+    web = [
+        c for c in chunks
+        if getattr(c, "source_type", None) == SourceType.WEB.value
+    ]
+    web_top = (
+        max(float(c.relevance_score or c.score or 0.0) for c in web)
+        if web
+        else 0.0
+    )
 
     if document_task or document_qa_mode:
         private_score = _score_private_sources(chunks)
         if private_score >= 0.45 and evidence_relevance >= 0.35:
             return EvidenceStrength.STRONG
         if private_score >= 0.25:
+            return EvidenceStrength.PARTIAL
+        if prefer_web and web_top >= 0.40:
             return EvidenceStrength.PARTIAL
         return EvidenceStrength.NONE
 
@@ -210,6 +224,10 @@ def _derive_overall_strength(
             if (c.source_type or SourceType.LEGAL.value) == SourceType.LEGAL.value
         ]
         if not legal_chunks:
+            if web:
+                if web_top >= 0.45 or (prefer_web and web_top >= 0.35):
+                    return EvidenceStrength.PARTIAL
+                return EvidenceStrength.WEAK
             private = _score_private_sources(chunks)
             if private >= 0.30:
                 return EvidenceStrength.WEAK
@@ -309,7 +327,7 @@ def _score_source_quality(chunks: list[RetrievedChunk]) -> float:
         for c in chunks
     ]
     avg = sum(scores) / len(scores)
-    diversity = len({c.source_type for c in chunks}) / 3.0
+    diversity = len({c.source_type for c in chunks}) / 4.0
     return min(1.0, avg * 0.75 + diversity * 0.25)
 
 

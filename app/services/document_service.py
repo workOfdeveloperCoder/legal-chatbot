@@ -213,7 +213,9 @@ class DocumentService:
                 )
 
             scope = DocumentScope.CONVERSATION
-
+            # Inherit matter so sibling chats in the same matter can retrieve it.
+            if conversation.matter_id is not None:
+                matter_id = conversation.matter_id
 
 
         # ==================================================

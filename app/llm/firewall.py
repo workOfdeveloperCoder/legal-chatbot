@@ -199,8 +199,20 @@ _GREETING = re.compile(
 
 _LEGAL_SIGNALS = (
     # English procedure / institutions
-    "law",
+        "law",
     "legal",
+    "laws",
+    "rights",
+    "liability",
+    "jurisdiction",
+    "tribunal",
+    "pakistan",
+    "pakistani",
+    "ppc",
+    "crpc",
+    "cpc",
+    "qanoon",
+    "qanun",
     "court",
     "judge",
     "lawyer",
@@ -211,10 +223,41 @@ _LEGAL_SIGNALS = (
     "judgement",
     "statute",
     "section",
+    "sections",
     "article",
+    "articles",
+    "clause",
+    "clauses",
+    "provision",
+    "provisions",
+    "subsection",
+    "sub-section",
+    "schedule",
+    "chapter",
+    "preamble",
+    "legislation",
+    "legislative",
+    "statutory",
+    "enactment",
+    "regulation",
+    "regulations",
+    "by-law",
+    "bylaw",
+    "bye-law",
+    "jurisprudence",
+    "doctrine",
     "ordinance",
     "constitution",
     "precedent",
+    "citation",
+    "citations",
+    "gazette",
+    "notification",
+    "codified",
+    "uncodified",
+    "penal",
+    "procedural",
+    "substantive",
     "plaint",
     "petition",
     "appeal",
@@ -393,6 +436,32 @@ _FOLLOW_UP = re.compile(
     r"in (?:punjab|sindh|islamabad|kpk|balochistan|pakistan)\??|"
     r"aur\??|phir\??|mazid|مزید|اور کیا|پھر کیا"
     r")\s*$",
+    re.IGNORECASE,
+)
+
+# Short replies that point at the prior turn ("what is this", "iska matlab").
+_DEMONSTRATIVE_FOLLOWUP = re.compile(
+    r"(?:"
+    r"\bwhat(?:'s|\s+is|\s+are|\s+was|\s+were)?\s+"
+    r"(?:this|that|it|these|those)\b|"
+    r"\bwhat\s+does\s+(?:this|that|it)\s+mean\b|"
+    r"\bwhat\s+do\s+you\s+mean\b|"
+    r"\bexplain\s+(?:this|that|it|more|further)\b|"
+    r"\bclarify(?:\s+(?:this|that|it))?\b|"
+    r"\belaborate(?:\s+(?:on\s+)?(?:this|that|it))?\b|"
+    r"\btell\s+me\s+more\b|"
+    r"\bin\s+(?:simple|plain)\s+words\b|"
+    r"\bsimplify(?:\s+(?:this|that|it))?\b|"
+    r"\bsame\s+for\b|"
+    r"\band\s+(?:this|that)\b|"
+    r"\b(?:this|that|it|these|those)\b|"
+    r"\b(?:yeh?|ye)\s+kya\s+hai\b|"
+    r"\b(?:is|iska|uska)\s+(?:ka\s+)?matlab\b|"
+    r"\baur\s+batao\b|"
+    r"\bthora\s+(?:aur\s+)?(?:detail|samjhao)\b|"
+    r"\bmazid\b|"
+    r"\b(?:فوق|یہ کیا ہے|اس کا مطلب)\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -754,6 +823,19 @@ class LLMFirewall:
             re.IGNORECASE,
         ):
             return True
+        # Educational / conceptual questions about how statutes are structured.
+        if re.search(
+            r"\b(?:what\s+(?:is|are|does|do)|what(?:'s| is)\s+meant|"
+            r"meaning\s+of|difference\s+between|explain|define|"
+            r"definition\s+of)\b.{0,80}\b"
+            r"(?:section|sections|article|articles|clause|clauses|"
+            r"provision|provisions|statute|statutes|act|acts|"
+            r"ordinance|code|codes|law|laws|schedule|chapter|"
+            r"preamble|legislation)\b",
+            text,
+            re.IGNORECASE,
+        ):
+            return True
         return False
 
     def _looks_like_case_followup(self, text: str) -> bool:
@@ -768,7 +850,8 @@ class LLMFirewall:
                 if signal in text:
                     return True
                 continue
-            if re.search(rf"\b{re.escape(signal)}\b", text):
+            # Match simple English plurals: section→sections, article→articles.
+            if re.search(rf"\b{re.escape(signal)}(?:es|s)?\b", text):
                 return True
         return False
 
@@ -779,18 +862,45 @@ class LLMFirewall:
     ) -> bool:
         if not history:
             return False
-        prior_legal = False
-        for message in reversed(history):
-            if getattr(message, "role", "") != "user":
-                continue
-            if self._looks_legal_or_case(self._normalize(message.content)):
-                prior_legal = True
-                break
-        if not prior_legal:
+        if not self._conversation_has_legal_context(history):
             return False
         if _FOLLOW_UP.match(text):
             return True
-        return len(text) <= 80 and not self._is_code_request(text)
+        if self._is_demonstrative_followup(text):
+            return True
+        # Short non-code replies in an ongoing legal thread.
+        return len(text) <= 120 and not self._is_code_request(text)
+
+    def _conversation_has_legal_context(
+        self,
+        history: list[Message],
+    ) -> bool:
+        """True if recent user or assistant turns look legal/case-related."""
+        recent = history[-12:]
+        for message in reversed(recent):
+            content = self._normalize(getattr(message, "content", "") or "")
+            if content and self._looks_legal_or_case(content):
+                return True
+        return False
+
+    @staticmethod
+    def _is_demonstrative_followup(text: str) -> bool:
+        cleaned = (text or "").strip()
+        if not cleaned or len(cleaned) > 160:
+            return False
+        if not _DEMONSTRATIVE_FOLLOWUP.search(cleaned):
+            return False
+        words = cleaned.split()
+        if len(words) <= 14:
+            return True
+        return bool(
+            re.search(
+                r"\b(?:what|why|how|explain|clarify|mean|matlab|kya|"
+                r"simplify|elaborate)\b",
+                cleaned,
+                re.IGNORECASE,
+            )
+        )
 
     @staticmethod
     def _strip_jailbreak(text: str) -> str:

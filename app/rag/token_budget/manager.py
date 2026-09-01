@@ -58,6 +58,7 @@ class TokenBudgetManager:
             max_legal_evidence_tokens=settings.TOKEN_MAX_LEGAL_EVIDENCE_TOKENS,
             max_matter_evidence_tokens=settings.TOKEN_MAX_MATTER_EVIDENCE_TOKENS,
             max_conversation_document_tokens=settings.TOKEN_MAX_CONVERSATION_DOCUMENT_TOKENS,
+            max_web_evidence_tokens=settings.TOKEN_MAX_WEB_EVIDENCE_TOKENS,
             scaffolding_overhead_tokens=settings.TOKEN_SCAFFOLDING_OVERHEAD,
             token_counting_enabled=settings.TOKEN_COUNTING_ENABLED,
             cost_tracking_enabled=settings.TOKEN_COST_TRACKING_ENABLED,
@@ -97,6 +98,7 @@ class TokenBudgetManager:
         reserved_output_tokens: int | None = None,
         document_qa_mode: bool = False,
         duplicate_system_in_user: bool = True,
+        prefer_web: bool = False,
     ) -> PackedContext:
         """
         Allocate available input tokens and pack context for the LLM call.
@@ -179,27 +181,46 @@ class TokenBudgetManager:
         legal_cap = min(limits.max_legal_evidence_tokens, remaining)
         matter_cap = min(limits.max_matter_evidence_tokens, remaining)
         conversation_cap = min(limits.max_conversation_document_tokens, remaining)
+        web_cap = min(getattr(limits, "max_web_evidence_tokens", 1800), remaining)
         history_cap = min(limits.max_conversation_tokens, remaining)
+
+        has_web = any(
+            (c.source_type or "") == SourceType.WEB.value for c in chunks
+        )
 
         if document_qa_mode:
             # Give more room to uploaded docs; keep a thin legal band.
             matter_share = int(remaining * 0.45)
             conversation_share = int(remaining * 0.25)
             legal_share = int(remaining * 0.15)
+            if prefer_web and has_web:
+                web_share = int(remaining * 0.20)
+                legal_share = max(0, legal_share - int(remaining * 0.05))
+                matter_share = max(0, matter_share - int(remaining * 0.05))
+            else:
+                web_share = int(remaining * 0.05) if has_web else 0
             history_share = remaining - (
-                matter_share + conversation_share + legal_share
+                matter_share + conversation_share + legal_share + web_share
             )
         else:
             legal_share = int(remaining * 0.50)
             matter_share = int(remaining * 0.18)
             conversation_share = int(remaining * 0.12)
+            if prefer_web and has_web:
+                web_share = int(remaining * 0.30)
+                legal_share = max(0, legal_share - web_share)
+            else:
+                web_share = int(remaining * 0.10) if has_web else 0
+                if has_web:
+                    legal_share = max(0, legal_share - web_share)
             history_share = remaining - (
-                legal_share + matter_share + conversation_share
+                legal_share + matter_share + conversation_share + web_share
             )
 
         legal_budget = max(0, min(legal_cap, legal_share))
         matter_budget = max(0, min(matter_cap, matter_share))
         conversation_budget = max(0, min(conversation_cap, conversation_share))
+        web_budget = max(0, min(web_cap, web_share)) if has_web else 0
         history_budget = max(0, min(history_cap, history_share))
 
         # Reclaim unused evidence budget into history if evidence is light.
@@ -208,6 +229,11 @@ class TokenBudgetManager:
             unused = (
                 legal_budget + matter_budget + conversation_budget
             ) - evidence_tokens_raw
+            # Prefer giving reclaimed room to web when the user asked for it.
+            if prefer_web and has_web and unused > 0:
+                extra_web = min(unused // 2, max(0, web_cap - web_budget))
+                web_budget += extra_web
+                unused -= extra_web
             history_budget = min(
                 limits.max_conversation_tokens,
                 history_budget + max(0, unused // 2),
@@ -230,6 +256,7 @@ class TokenBudgetManager:
             legal_budget=legal_budget,
             conversation_budget=conversation_budget,
             matter_budget=matter_budget,
+            web_budget=web_budget,
         )
         trim_reasons.extend(evidence_reasons)
 
@@ -273,6 +300,11 @@ class TokenBudgetManager:
             for c in packed_chunks
             if c.source_type == SourceType.MATTER.value
         )
+        web_tokens = sum(
+            self.counter.count(c.text)
+            for c in packed_chunks
+            if c.source_type == SourceType.WEB.value
+        )
 
         input_tokens = (
             system_tokens
@@ -307,6 +339,11 @@ class TokenBudgetManager:
                 self.counter.count(c.text)
                 for c in packed_chunks
                 if c.source_type == SourceType.MATTER.value
+            )
+            web_tokens = sum(
+                self.counter.count(c.text)
+                for c in packed_chunks
+                if c.source_type == SourceType.WEB.value
             )
             input_tokens = (
                 system_tokens
@@ -400,6 +437,7 @@ class TokenBudgetManager:
             legal_evidence_tokens=legal_tokens,
             conversation_evidence_tokens=conversation_tokens,
             matter_evidence_tokens=matter_tokens,
+            web_evidence_tokens=web_tokens,
             reserved_output_tokens=reserved,
             safety_margin_tokens=limits.safety_margin,
             scaffolding_tokens=scaffolding,

@@ -263,6 +263,13 @@ class TestSourceReference:
 
 
 class TestTieredRetriever:
+    @pytest.fixture(autouse=True)
+    def _nomic_embedding_for_qdrant(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.rag.qdrant_retriever.settings.EMBEDDING_MODEL",
+            "nomic-embed-text:latest",
+        )
+
     @pytest.mark.asyncio
     async def test_search_queries_legal_before_private_tiers(self):
         from app.rag.qdrant_retriever import QdrantRetriever
@@ -307,6 +314,51 @@ class TestTieredRetriever:
         assert "chatbot_documents" in call_order
         assert outcome.metadata.legal_chunks >= 0
         assert outcome.chunks
+
+    @pytest.mark.asyncio
+    async def test_prefer_legal_corpus_skips_private_uploads(self):
+        from app.rag.qdrant_retriever import QdrantRetriever
+
+        retriever = QdrantRetriever()
+        call_order: list[str] = []
+
+        async def fake_embed(_query):
+            return [0.1]
+
+        async def fake_query_points(*, collection_name, **kwargs):
+            call_order.append(collection_name)
+            return SimpleNamespace(
+                points=[
+                    SimpleNamespace(
+                        id="legal-1",
+                        score=0.88,
+                        payload={
+                            "text": "Statutes are divided into sections and articles.",
+                            "filename": "structure.txt",
+                            "chunk_index": 0,
+                        },
+                    )
+                ]
+            )
+
+        retriever.embedding.embed_query = fake_embed
+        retriever.client.query_points = fake_query_points
+
+        outcome = await retriever.search(
+            query="what is sections and articles in law",
+            user_id=str(uuid.uuid4()),
+            matter_id=str(uuid.uuid4()),
+            conversation_id=str(uuid.uuid4()),
+            task="statute_search",
+            prefer_legal_corpus=True,
+        )
+
+        assert call_order == ["legal_documents"]
+        assert "chatbot_documents" not in call_order
+        assert outcome.metadata.legal_chunks >= 1
+        assert all(
+            (c.source_type or "legal") == "legal" for c in outcome.chunks
+        )
 
     @pytest.mark.asyncio
     async def test_document_scoped_skips_legal_corpus(self):

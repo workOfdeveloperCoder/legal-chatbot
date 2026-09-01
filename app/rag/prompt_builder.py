@@ -34,6 +34,7 @@ class PromptBuilder:
         language: LanguageDetection | None = None,
         include_system_in_user: bool = True,
         compact: bool = False,
+        prefer_web: bool = False,
     ) -> str:
 
         prompt_parts = []
@@ -54,6 +55,9 @@ LEGAL TASK TYPE:
 {task}
 """
             )
+            task_instruction = self._build_task_instruction(task)
+            if task_instruction:
+                prompt_parts.append(task_instruction)
 
         if document_scoped:
             prompt_parts.append(
@@ -101,6 +105,9 @@ The document itself is the primary evidence.
 
 Rules:
 - Write in a direct, professional tone for legal practitioners.
+- Synthesize a readable answer — do NOT paste or dump long raw passages
+  from the uploaded file into the reply.
+- Use normal English spacing between words; write clear short paragraphs.
 - ALWAYS attribute legal propositions to the document/author:
   "According to the article..." / "The author argues..." /
   "The uploaded document identifies..."
@@ -151,6 +158,37 @@ A chunk mentioning a keyword alone is NOT sufficient for a multi-part legal test
 
         prompt_parts.append(self._build_context(chunks))
 
+        if prefer_web:
+            has_web = any(
+                (c.source_type or "") == SourceType.WEB.value for c in chunks
+            )
+            if has_web:
+                prompt_parts.append(
+                    """
+INTERNET SEARCH MODE (user enabled Web):
+
+Live web results are in the INTERNET SEARCH section below. Use them as
+primary research material for this answer. Cite [Source N] and include
+URLs when useful. Prefer official government/court domains over blogs.
+Still qualify unofficial pages; they are not binding authority.
+
+Do NOT summarize unrelated uploaded conversation/matter documents unless
+the user clearly asked about those files. Answer the user's question
+directly (e.g. what sections/articles mean in law) using internet and
+legal authority sources first.
+"""
+                )
+            else:
+                prompt_parts.append(
+                    """
+INTERNET SEARCH MODE (user enabled Web):
+
+Live internet search ran but returned no usable results. Say that clearly,
+then answer only with careful general Pakistani legal guidance and advise
+verification against primary sources.
+"""
+                )
+
         if evidence_assessment is not None:
             prompt_parts.append(
                 self._build_assessment_guidance(evidence_assessment)
@@ -168,6 +206,100 @@ A chunk mentioning a keyword alone is NOT sufficient for a multi-part legal test
 
         return "\n\n".join(prompt_parts)
 
+    def _build_task_instruction(self, task: str | object) -> str:
+        name = task.value if hasattr(task, "value") else str(task or "")
+        instructions = {
+            "document_draft": """
+DRAFTING INSTRUCTION:
+
+Produce a complete, court-ready Pakistani legal draft when the user has
+given enough facts. If parties, forum, facts, or relief are missing, ask
+concise clarifying questions first, then draft.
+
+Use this structure when drafting:
+1. Title / nature of document
+2. Parties and addresses
+3. Material facts (numbered)
+4. Legal grounds with [Source N] where evidence supports them
+5. Prayer / relief
+6. Place, date, and signature block
+
+Use formal legal English (or the user's language). Do not invent case
+citations or statutory text that is not in evidence.
+""",
+            "hearing_prep": """
+HEARING PREPARATION INSTRUCTION:
+
+Build a practical hearing note for counsel in this order:
+1. Forum, stage, and issues for determination
+2. Client's case theory (one paragraph)
+3. Facts to prove and likely evidence
+4. Supporting authorities from retrieved sources ([Source N])
+5. Anticipated objections / opposing points
+6. Suggested oral submissions (short, speakable bullets)
+7. Fallback / alternative prayer
+
+Lead with the strongest available argument. Flag gaps where evidence is thin.
+""",
+            "compare_provisions": """
+COMPARE PROVISIONS INSTRUCTION:
+
+Compare the named provisions in a side-by-side professional note:
+1. Provision A — text/scope from evidence
+2. Provision B — text/scope from evidence
+3. Overlap
+4. Differences
+5. Which prevails if they conflict (with authority)
+6. Application to the user's facts
+
+If only one provision is named, ask for the other. Cite [Source N].
+Do not merge conflicting rules into one.
+""",
+            "contract_review": """
+CONTRACT REVIEW INSTRUCTION:
+
+Review the contract as a Pakistani commercial lawyer:
+1. Parties, consideration, and governing law
+2. Material clauses (obligations, payment, term)
+3. Termination, liability, indemnity, dispute resolution
+4. Legal risks / unenforceable or one-sided terms
+5. Suggested protective language
+
+Separate what the contract says from what the law requires.
+Do not treat the contract as statute.
+Structured clause cards are attached separately — keep the memo
+narrative, do not dump a JSON object.
+""",
+            "summarization": """
+SUMMARIZATION INSTRUCTION:
+
+Give a concise professional summary:
+1. What the document is and who it is by/for
+2. Key points (bullets)
+3. Parties or author position
+4. Legal issues raised
+5. Anything the document does not settle
+
+Attribute content to the document. Do not add law that is not in the
+document unless LEGAL AUTHORITY sources are also retrieved.
+""",
+            "case_search": """
+AUTHORITY SEARCH INSTRUCTION:
+
+Find and present governing Pakistani authorities:
+1. Direct answer
+2. Statutes / rules (section-accurate)
+3. Binding or relevant case law
+4. How they apply to the issue
+5. Gaps / what was not found
+
+Prefer corpus evidence over internet snippets. If using a web result,
+name the URL and say it is not a substitute for the official reporter
+or gazette.
+""",
+        }
+        return instructions.get(name, "")
+
     def _build_complexity_guidance(
         self,
         complexity: QueryComplexity,
@@ -176,7 +308,13 @@ A chunk mentioning a keyword alone is NOT sufficient for a multi-part legal test
             return """
 QUESTION COMPLEXITY: SIMPLE
 
-Provide a concise, direct answer. Do not over-structure.
+Write a clear, polished answer in natural professional prose (2–4 short
+paragraphs). Synthesize the retrieved sources — do NOT paste or dump raw
+document text. Use normal English spacing between words.
+If the evidence is an article or commentary, attribute it
+("According to the article…") and note it is not primary statute text.
+Lead with the direct definition/answer, then briefly explain significance
+or limits. Cite with [Source N] only where a specific claim needs support.
 """
         if complexity == QueryComplexity.RESEARCH:
             return """
@@ -350,9 +488,10 @@ Rules:
 - Do not include a separate Sources, References, or Citations section.
 - Distinguish legal authority from matter/conversation documents.
 - Do not invent statutes, sections, cases, citations, or quotes.
-- If evidence is insufficient, say clearly:
-  "I don't have enough reliable evidence in the available sources to
-  answer that conclusively."
+- If evidence is insufficient or empty, still answer Pakistani legal
+  questions when you can, but open with a clear notice that no matching
+  document/corpus passage was found and the answer is general guidance
+  only (not concrete authority-backed advice).
 - Stay in scope: Pakistani law, the user's case, and uploaded documents.
   Refuse programming/code, illegal how-to, and unrelated topics.
 - Be concise for simple questions; provide detail only when required.
@@ -397,9 +536,10 @@ Rules:
 - Do not include a separate Sources, References, or Citations section.
 - Distinguish legal authority from matter/conversation documents.
 - Do not invent statutes, sections, cases, citations, or quotes.
-- If evidence is insufficient, say clearly:
-  "I don't have enough reliable evidence in the available sources to
-  answer that conclusively."
+- If evidence is insufficient or empty, still answer Pakistani legal
+  questions when you can, but open with a clear notice that no matching
+  document/corpus passage was found and the answer is general guidance
+  only (not concrete authority-backed advice).
 - Stay in scope: Pakistani law, the user's case, and uploaded documents.
   Refuse programming/code, illegal how-to, and unrelated topics.
 - Be concise for simple questions; provide detail only when required.
@@ -415,22 +555,40 @@ Rules:
             return """
 RETRIEVED EVIDENCE:
 
-No legal documents were retrieved.
+No legal documents, statutes, judgments, or uploaded files were retrieved
+for this question.
 
-Do not fabricate legal information.
-State clearly that available sources are insufficient.
+You MAY still answer if the question is about Pakistani law, procedure,
+legal concepts, or the user's case — using general Pakistani legal
+knowledge.
+
+Mandatory first paragraph (exact meaning, you may rephrase lightly):
+"No matching document or corpus passage was found for this question. The
+following is general legal guidance only — not grounded in retrieved
+authorities or uploaded files — and should be verified by counsel against
+primary sources before reliance."
+
+Then give a clear, practical legal answer. Do not invent case citations,
+PLD/SCMR citations, or exact quotation marks from statutes you cannot
+verify. Prefer general doctrine, named statutes when commonly known, and
+qualify uncertain points. Do not refuse solely because evidence is empty.
 """
 
         grouped: dict[str, list[tuple[int, RetrievedChunk]]] = {
             SourceType.LEGAL.value: [],
             SourceType.CONVERSATION.value: [],
             SourceType.MATTER.value: [],
+            SourceType.WEB.value: [],
         }
 
         for index, chunk in enumerate(chunks, 1):
             source_type = chunk.source_type or SourceType.LEGAL.value
             if source_type not in grouped:
-                source_type = SourceType.LEGAL.value
+                source_type = (
+                    SourceType.WEB.value
+                    if source_type == "web"
+                    else SourceType.LEGAL.value
+                )
             grouped[source_type].append((index, chunk))
 
         sections: list[str] = []
@@ -444,12 +602,17 @@ State clearly that available sources are insufficient.
             SourceType.MATTER.value: (
                 "MATTER DOCUMENTS (case-specific facts/content — priority 4)"
             ),
+            SourceType.WEB.value: (
+                "INTERNET SEARCH (untrusted live web results — not binding "
+                "unless an official government or court website)"
+            ),
         }
 
         for source_type in (
             SourceType.LEGAL.value,
             SourceType.CONVERSATION.value,
             SourceType.MATTER.value,
+            SourceType.WEB.value,
         ):
             items = grouped[source_type]
             if not items:
@@ -490,6 +653,12 @@ State clearly that available sources are insufficient.
 
         if chunk.document_id:
             meta_parts.append(f"Document ID: {chunk.document_id}")
+
+        url = getattr(chunk, "url", None) or (
+            chunk.source_reference if (chunk.source_type == SourceType.WEB.value) else None
+        )
+        if url:
+            meta_parts.append(f"URL: {url}")
 
         if chunk.chunk_id:
             meta_parts.append(f"Chunk ID: {chunk.chunk_id}")

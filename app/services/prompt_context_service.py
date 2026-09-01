@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from app.models.user import User
@@ -11,6 +12,8 @@ from app.rag.models import Message, Memory
 from app.repositories.message_repository import MessageRepository
 from app.services.memory_service import MemoryService
 
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -123,38 +126,45 @@ class PromptContextService:
         # Semantic Memory
         # =====================================
 
-        memories = await (
-            self._memory_service
-            .get_memories(
+        try:
+            memories = await (
+                self._memory_service
+                .get_memories(
 
-                user_id=user.id,
+                    user_id=user.id,
 
-                matter_id=(
+                    matter_id=(
 
-                    conversation.matter_id
+                        conversation.matter_id
 
-                    if conversation.matter_id
+                        if conversation.matter_id
 
-                    else None
+                        else None
 
-                ),
+                    ),
 
-                conversation_id=(
+                    conversation_id=(
 
-                    conversation.id
+                        conversation.id
 
-                    if conversation.id
+                        if conversation.id
 
-                    else None
+                        else None
 
-                ),
+                    ),
 
-                query=query,
+                    query=query,
 
-                limit=self.MEMORY_LIMIT,
+                    limit=self.MEMORY_LIMIT,
 
+                )
             )
-        )
+        except Exception:
+            logger.exception(
+                "Memory retrieval failed user=%s; continuing without memories",
+                user.id,
+            )
+            memories = []
 
 
 

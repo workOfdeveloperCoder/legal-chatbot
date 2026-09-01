@@ -44,12 +44,14 @@ class HybridReranker(BaseReranker):
         SourceType.LEGAL.value: 0.20,
         SourceType.CONVERSATION.value: 0.08,
         SourceType.MATTER.value: 0.12,
+        SourceType.WEB.value: 0.02,
     }
 
     DOCUMENT_TASK_TIER_BOOST = {
         SourceType.LEGAL.value: 0.0,
         SourceType.CONVERSATION.value: 0.15,
         SourceType.MATTER.value: 0.18,
+        SourceType.WEB.value: 0.0,
     }
 
     async def rerank(
@@ -129,6 +131,11 @@ def _score_chunk(
             exact_phrase_boost = 0.05
             break
 
+    named_entity_boost = 0.0
+    for entity in _named_entities(chunk, query_terms):
+        if entity in text:
+            named_entity_boost = max(named_entity_boost, 0.14)
+
     source_type = chunk.source_type or SourceType.LEGAL.value
     tier_boost = tier_boosts.get(source_type, 0.0)
 
@@ -139,9 +146,59 @@ def _score_chunk(
         + court_boost
         + year_boost
         + exact_phrase_boost
+        + named_entity_boost
         + tier_boost,
         6,
     )
+
+
+_NAMED_ENTITY_STOPWORDS = frozenset(
+    {
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "why",
+        "how",
+        "does",
+        "did",
+        "do",
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "justice",
+        "court",
+        "section",
+        "article",
+        "pakistan",
+        "pakistani",
+        "primary",
+        "task",
+        "newly",
+        "established",
+        "independent",
+        "government",
+    }
+)
+
+
+def _named_entities(
+    chunk: RetrievedChunk,
+    query_terms: set[str],
+) -> set[str]:
+    del chunk
+    return {
+        term
+        for term in query_terms
+        if len(term) >= 4 and term not in _NAMED_ENTITY_STOPWORDS
+    }
 
 
 def _tokenize(text: str) -> set[str]:

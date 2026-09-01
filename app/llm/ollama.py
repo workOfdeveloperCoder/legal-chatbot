@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncIterator
 
 import httpx
 
 from app.core.config import settings
 from app.llm.base import BaseLLM
+from app.llm.delta import StreamDelta
 from app.llm.errors import LLMPermanentError, LLMTransientError
 from app.llm.model_capabilities import ModelCapabilities, ModelCapabilityRegistry
 from app.llm.registry import LLMAdapterRegistry
-from app.rag.reasoning_cleanup import strip_reasoning_output
+from app.rag.reasoning_cleanup import (
+    ReasoningStreamFilter,
+    strip_reasoning_output,
+)
 from app.schemas.llm import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -19,9 +24,16 @@ from app.schemas.llm import (
 logger = logging.getLogger(__name__)
 
 # DeepSeek R1 spends many tokens on hidden "thinking" before content.
-# Too-low num_predict yields empty message.content and a 503 upstream.
-_R1_MIN_PREDICT = 4096
-_R1_RETRY_PREDICT = 8192
+# Too-low num_predict yields empty message.content; RAG then falls back
+# to retrieved passages instead of raising a hard 503.
+_R1_MIN_PREDICT = 12288
+_R1_RETRY_PREDICT = 16384
+
+_THINKING_ANSWER_MARKERS = (
+    re.compile(
+        r"(?is)(?:final answer|answer|conclusion|to sum up|in summary)\s*[:\-]\s*(.+)$"
+    ),
+)
 
 
 @LLMAdapterRegistry.register(
@@ -89,7 +101,7 @@ class OllamaLLM(BaseLLM):
         if not parsed.content.strip():
             thinking = ((data.get("message") or {}).get("thinking") or "").strip()
             done_reason = data.get("done_reason")
-            if thinking and predict < _R1_RETRY_PREDICT:
+            if predict < _R1_RETRY_PREDICT:
                 logger.warning(
                     "Ollama R1 returned empty content (done_reason=%s, "
                     "predict=%s); retrying with num_predict=%s",
@@ -99,9 +111,44 @@ class OllamaLLM(BaseLLM):
                 )
                 data = await self._chat(request, num_predict=_R1_RETRY_PREDICT)
                 parsed = self._parse_chat_payload(data)
+                thinking = (
+                    ((data.get("message") or {}).get("thinking") or "").strip()
+                    or thinking
+                )
+                done_reason = data.get("done_reason") or done_reason
 
             if not parsed.content.strip():
-                # Transient so gateway may retry / fallback — never invent an answer.
+                salvaged = _salvage_answer_from_thinking(thinking)
+                if salvaged:
+                    logger.warning(
+                        "Ollama R1 empty content (done_reason=%s); "
+                        "salvaged %s chars from thinking",
+                        done_reason,
+                        len(salvaged),
+                    )
+                    return ChatCompletionResponse(
+                        content=salvaged,
+                        prompt_tokens=parsed.prompt_tokens,
+                        completion_tokens=parsed.completion_tokens,
+                        total_tokens=parsed.total_tokens,
+                    )
+
+                # Soft-fail for R1 so RAG can show retrieved passages instead
+                # of a hard 503. Non-R1 models still raise.
+                if self._is_r1_model():
+                    logger.warning(
+                        "Ollama R1 empty content after retries "
+                        "(done_reason=%s, predict=%s); returning blank "
+                        "for RAG passage fallback",
+                        done_reason,
+                        max(predict, _R1_RETRY_PREDICT),
+                    )
+                    return ChatCompletionResponse(
+                        content="",
+                        prompt_tokens=parsed.prompt_tokens,
+                        completion_tokens=parsed.completion_tokens,
+                        total_tokens=parsed.total_tokens,
+                    )
                 raise LLMTransientError(
                     "Ollama returned empty final content "
                     f"(model={self.model_name}, done_reason={done_reason}, "
@@ -181,22 +228,28 @@ class OllamaLLM(BaseLLM):
             ),
         )
 
+    def _is_r1_model(self) -> bool:
+        name = (self.model_name or "").lower()
+        return "deepseek" in name and "r1" in name
+
     def _effective_num_predict(self, requested: int) -> int:
         value = max(int(requested or 0), 256)
-        if "deepseek-r1" in (self.model_name or "").lower():
+        if self._is_r1_model():
             return max(value, _R1_MIN_PREDICT)
         return value
 
     async def generate_stream(
         self,
         request: ChatCompletionRequest,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[str | StreamDelta]:
         if not settings.LLM_ENABLE_STREAMING:
             async for chunk in super().generate_stream(request):
                 yield chunk
             return
 
         predict = self._effective_num_predict(request.max_tokens)
+        filter_ = ReasoningStreamFilter()
+        yielded_visible = False
         try:
             async with self.client.stream(
                 "POST",
@@ -226,11 +279,17 @@ class OllamaLLM(BaseLLM):
                     except ValueError:
                         continue
                     message = event.get("message") or {}
+                    native_thinking = message.get("thinking")
+                    if native_thinking:
+                        yield StreamDelta(text=str(native_thinking), kind="thinking")
                     piece = message.get("content")
                     if piece:
-                        cleaned = strip_reasoning_output(piece)
-                        if cleaned:
-                            yield cleaned
+                        visible, thinking = filter_.feed_parts(piece)
+                        if thinking:
+                            yield StreamDelta(text=thinking, kind="thinking")
+                        if visible and visible.strip():
+                            yielded_visible = True
+                            yield StreamDelta(text=visible, kind="token")
                     if event.get("done"):
                         break
         except httpx.TimeoutException as exc:
@@ -238,5 +297,47 @@ class OllamaLLM(BaseLLM):
         except httpx.TransportError as exc:
             raise LLMTransientError(f"Ollama stream transport: {exc}") from exc
 
+        leftover_visible, leftover_thinking = filter_.finish_parts()
+        if leftover_thinking:
+            yield StreamDelta(text=leftover_thinking, kind="thinking")
+        if leftover_visible and leftover_visible.strip():
+            yielded_visible = True
+            yield StreamDelta(text=leftover_visible, kind="token")
+        if yielded_visible:
+            return
+        logger.warning(
+            "Ollama stream returned no visible content (model=%s); "
+            "falling back to non-stream generate()",
+            self.model_name,
+        )
+        parsed = await self.generate(request)
+        if parsed.content.strip():
+            yield StreamDelta(text=parsed.content, kind="token")
+
     async def aclose(self) -> None:
         await self.client.aclose()
+
+
+def _salvage_answer_from_thinking(thinking: str) -> str:
+    """Best-effort visible answer when R1 never left the thinking channel."""
+    text = (thinking or "").strip()
+    if len(text) < 40:
+        return ""
+    for pattern in _THINKING_ANSWER_MARKERS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        candidate = " ".join(match.group(1).split()).strip()
+        if len(candidate) >= 40:
+            return candidate[:2000]
+    paragraphs = [
+        " ".join(part.split()).strip()
+        for part in re.split(r"\n\s*\n", text)
+        if part.strip()
+    ]
+    for paragraph in reversed(paragraphs):
+        if len(paragraph) >= 60 and not paragraph.lower().startswith(
+            ("i need", "i should", "let me", "the user", "wait,", "hmm")
+        ):
+            return paragraph[:2000]
+    return ""

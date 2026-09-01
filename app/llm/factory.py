@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from app.core.config import settings
 from app.llm.base import BaseLLM
+from app.llm.errors import LLMPermanentError
 from app.llm.gateway import LLMGateway
 from app.llm.model_capabilities import ModelCapabilities, ModelCapabilityRegistry
 from app.llm.provider_config import (
     effective_llm_timeout,
+    is_online_provider,
+    nonempty_secret,
     normalize_provider,
     resolve_chat_model,
     resolve_llm_base_url,
@@ -18,6 +21,7 @@ from app.llm.registry import LLMAdapterRegistry
 from app.llm.anthropic import AnthropicLLM as _AnthropicLLM  # noqa: F401
 from app.llm.ollama import OllamaLLM as _OllamaLLM  # noqa: F401
 from app.llm.openai_compatible import OpenAICompatibleLLM as _OpenAICompatibleLLM  # noqa: F401
+from app.llm.openrouter import OpenRouterLLM as _OpenRouterLLM  # noqa: F401
 
 
 class LLMFactory:
@@ -28,16 +32,22 @@ class LLMFactory:
         provider = settings.LLM_PROVIDER
         primary = LLMFactory._build_provider(
             provider=provider,
-            base_url=settings.LLM_URL,
-            model=settings.CHAT_MODEL,
+            base_url=settings.base_url_for_provider(provider),
+            model=settings.chat_model_for_provider(provider),
             api_key=settings.api_key_for_provider(provider),
         )
         fallback = None
         if settings.LLM_FALLBACK_PROVIDER:
             fallback = LLMFactory._build_provider(
                 provider=settings.LLM_FALLBACK_PROVIDER,
-                base_url=settings.LLM_FALLBACK_URL or settings.LLM_URL,
-                model=settings.LLM_FALLBACK_MODEL or settings.CHAT_MODEL,
+                base_url=(
+                    settings.LLM_FALLBACK_URL
+                    or settings.base_url_for_provider(settings.LLM_FALLBACK_PROVIDER)
+                ),
+                model=(
+                    settings.LLM_FALLBACK_MODEL
+                    or settings.chat_model_for_provider(settings.LLM_FALLBACK_PROVIDER)
+                ),
                 api_key=(
                     settings.LLM_FALLBACK_API_KEY
                     or settings.api_key_for_provider(settings.LLM_FALLBACK_PROVIDER)
@@ -61,8 +71,8 @@ class LLMFactory:
         resolved_provider = provider or settings.LLM_PROVIDER
         return LLMFactory._build_provider(
             provider=resolved_provider,
-            base_url=base_url or settings.LLM_URL,
-            model=model or settings.CHAT_MODEL,
+            base_url=base_url or settings.base_url_for_provider(resolved_provider),
+            model=model or settings.chat_model_for_provider(resolved_provider),
             api_key=(
                 api_key
                 if api_key is not None
@@ -94,6 +104,12 @@ class LLMFactory:
         api_key: str | None,
     ) -> BaseLLM:
         name = normalize_provider(provider)
+        if is_online_provider(name) and not nonempty_secret(api_key):
+            raise LLMPermanentError(
+                f"LLM provider {name!r} requires an API key. "
+                "Set LLM_API_KEY or the provider-specific key "
+                "(for OpenRouter: OPENROUTER_API_KEY)."
+            )
         resolved_model = resolve_chat_model(name, model)
         timeout = effective_llm_timeout(name, settings.LLM_TIMEOUT)
         return LLMAdapterRegistry.connect(

@@ -14,7 +14,7 @@ class CreateConversationRequest(BaseModel):
 
 
 class UpdateConversationRequest(BaseModel):
-    title: str
+    title: str = Field(..., min_length=1, max_length=120)
     is_pinned: bool | None = None
 
 

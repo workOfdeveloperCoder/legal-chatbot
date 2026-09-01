@@ -37,6 +37,7 @@ def score_evidence_chunk(chunk: RetrievedChunk) -> float:
         SourceType.LEGAL.value: 1.0,
         SourceType.MATTER.value: 0.85,
         SourceType.CONVERSATION.value: 0.80,
+        SourceType.WEB.value: 0.45,
     }.get((chunk.source_type or SourceType.LEGAL.value).lower(), 0.7)
 
     # Prefer chunks that still look like complete passages.
@@ -98,6 +99,7 @@ def pack_evidence_by_budget(
     legal_budget: int,
     conversation_budget: int,
     matter_budget: int,
+    web_budget: int = 0,
 ) -> tuple[list[RetrievedChunk], dict[str, int], list[str]]:
     """
     Pack ranked evidence into per-source budgets.
@@ -120,11 +122,13 @@ def pack_evidence_by_budget(
         SourceType.LEGAL.value: max(0, legal_budget),
         SourceType.CONVERSATION.value: max(0, conversation_budget),
         SourceType.MATTER.value: max(0, matter_budget),
+        SourceType.WEB.value: max(0, web_budget),
     }
     used = {
         SourceType.LEGAL.value: 0,
         SourceType.CONVERSATION.value: 0,
         SourceType.MATTER.value: 0,
+        SourceType.WEB.value: 0,
     }
     selected: dict[int, RetrievedChunk] = {}
     docs_seen: set[str] = set()

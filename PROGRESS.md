@@ -1,65 +1,38 @@
----
 # Project Progress Log
 
 ## Last Updated
-Monday, Aug 24, 2026 — 6:05 PM (UTC+5)
+Monday, Aug 31, 2026 — ~9:50 PM (UTC+5)
 
 ## Current State
-- Production-hardening code is in the repo: Qdrant API key on the shared client, production fail-closed checks, snapshot recover URIs, token overflow rejection, matter attach authorization, request-size middleware, firewall tightening
-- The application is **not production-ready** until a real server restore of `legal_documents`, private Qdrant + API key, `/ready`, and a Gemini live chat drill are verified
-- Unit tests: **370 passed**, 1 skipped, 0 failed
-- Deploy is **no Docker**: systemd + Nginx + loopback Qdrant/Postgres/Ollama (see `docs/PRODUCTION.md` and `deploy/legal-chatbot.service`)
-- Embeddings remain local `nomic-embed-text` 768-d cosine; `legal_documents` is never recreated
+- Chat LLM: **OpenRouter** `minimax/minimax-m2.7:free`
+- Qdrant search: **Hugging Face fastembed** `nomic-ai/nomic-embed-text-v1.5` (768-d, matches `legal_documents`)
+- Web search: only when UI Web toggle is on (`payload.web_search`)
+- `.env` switched away from OpenRouter Nemotron embed (2048-d — incompatible with Qdrant index)
 
 ## What Was Done This Session
-- Production `ENVIRONMENT=production` validation: require Qdrant API key, non-wildcard `TRUSTED_HOSTS`, hosted LLM key
-- Qdrant initialize fails closed without API key in production; logs `api_key_configured` never the secret
-- Snapshot recover builds a real Qdrant `location` (HTTP snapshot URL or `file://`)
-- Token budget truncates an oversized current question after shedding scaffolding; raises `TokenBudgetExceeded` (HTTP 413) instead of sending an oversized prompt
-- Gemini cl100k counts remain approximate (`tokenizer_native=false`; `/api/v1/llm/status` `tokenizer_exact` is false)
-- Online LLM timeout stays 120s when config is still the local 1800s sentinel; local DeepSeek 1800s preserved
-- Firewall: Roman Urdu / Urdu how-tos, dotted obfuscation, roleplay jailbreaks, multi-turn “continue” after an illegal turn; retrieved evidence stays untrusted
-- `ChatService` re-checks matter ownership before attaching `payload.matter_id` to an existing conversation
-- `RequestSizeLimitMiddleware` enforces `MAX_REQUEST_BYTES` via Content-Length (413)
-- Upload types limited to PDF/txt/md/csv (no broad `text/*`)
-- Rate limiter ignores `X-Forwarded-For` unless `TRUST_FORWARDED_FOR=true`
-- Docs/systemd template/`.env.example` updated for Ubuntu/CloudPanel/Nginx
-- Tests added for ops recover URIs, overflow, Gemini vs DeepSeek profiles, matter 403, request size, production config, firewall/injection
+- Diagnosed missing library Resources: `EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b:free` → `qdrant_embedding_compatible=False` → retriever returns zero legal chunks
+- Restored `.env` to `EMBEDDING_PROVIDER=huggingface` + nomic v1.5 + HF token; set `EMBEDDING_ONLINE_ONLY=false`
+- Verified end-to-end: 768-d embed → 3 Qdrant hits for "section 417 PPC"
+- Hardened `response_formatter.py`: strip `source_type=web` from sources/resources when `include_web=False`
+- Added chat request log: `web_search` + `quick_action` for debugging UI toggle issues
 
 ## In Progress / Half Done
-- Live Qdrant API-key handshake: **NOT VERIFIED**
-- `legal_documents` snapshot restore on a production host: **NOT VERIFIED**
-- Live SSE against Gemini: **NOT VERIFIED**
-- Backup/restore drill: **NOT VERIFIED**
-- Document ingestion still runs inside the upload HTTP request
-- Rate limiter is in-process (use 1 uvicorn worker)
+- API on `:8000` may be a **different app** (404 on `/api/v1/health/ready`); legal-chatbot needs restart on correct port
+- Remote server (`172.16.112.17:8000`?) may still run old code + old `.env`
 
 ## Next Steps (Do This First When You Return)
-1. On the target server: bind Qdrant to 127.0.0.1, set API key, restore `legal_documents`, run `python scripts/qdrant_ops.py verify legal_documents --vector-size 768 --payload`
-2. Copy `.env.example` → `/etc/legal-chatbot.env`; `alembic upgrade head`; enable `deploy/legal-chatbot.service` + Nginx from `docs/PRODUCTION.md`
-3. Confirm `curl /health` and `curl /ready` (postgres, qdrant, embeddings)
-4. Confirm `GET /api/v1/llm/status` reports Gemini `tokenizer_exact: false` (approximation) or fallback id if tiktoken is missing
-5. Exercise `POST /api/v1/chat/stream` with a real lawyer query, then Stop
-6. Only then consider background ingestion / Redis limiter / object storage
+1. **Restart legal-chatbot** so it loads the new `.env` (huggingface nomic, not OpenRouter embed)
+2. Confirm `/ready` shows `"embedding_provider": "huggingface"`, `"qdrant_embedding_compatible": true` (via stack.search.model contains nomic)
+3. Retry a legal query with **Web toggle OFF** — Resources should show `legal` corpus docs, no `web` badge
+4. If UI still shows web junk, check API logs for `Chat request web_search=True` (UI may be sending toggle on)
+5. For strict no-download server: use remote Ollama sidecar or Fireworks nomic API instead of fastembed
 
 ## Known Issues / Blockers
-- Rule-based firewall can still miss paraphrases or over-block unusual wording
-- Most `legal_documents` points still pre-v4 (parent expansion no-ops) — do not destroy the corpus
-- Claim grounding remains lexical
-- Large uploads can block API workers (sync embed)
-- Chunked requests without Content-Length are not size-checked in-app (Nginx `client_max_body_size` is the backstop)
-- Voice Mode returns 503 until faster-whisper and Piper are usable
-- Switching embeddings to OpenAI would require re-indexing Qdrant (do not)
-- MinIO/Redis settings exist but are unused; uploads are local disk
+- OpenRouter free embed models are **not nomic 768-d** — cannot search existing Qdrant without full re-index
+- fastembed downloads ~300MB once on first embed (not ideal for zero-download production)
+- Port 8000 currently occupied by another service
 
 ## Key Decisions & Context
-- No Docker / Compose — direct Linux services
-- Do not ask the user to select a language
-- Chat LLM and embeddings are independent: hosted Gemini chat, local nomic embeddings
-- legal-chatbot never writes corpus Qdrant (`legal_documents` is legal-gpt owned)
-- Criminal-law Q&A is allowed; operational "how to commit X" is not
-- Programming/code is always out of scope
-- Qdrant must not be exposed on a public IP
-- JWT `user_id` is the only tenant key for private vectors — never trust a client-supplied user id
-- Gemini tokenization is cl100k approximation, not native
----
+- UI Web toggle is the single source of truth for internet search
+- Qdrant `legal_documents` index is 768-d nomic — embedding model name must contain "nomic"
+- Chat (OpenRouter) and search (nomic embed) are intentionally separate providers

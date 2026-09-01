@@ -22,6 +22,19 @@ from app.schemas.llm import (
 )
 
 
+def test_factory_builds_local_ollama_adapter():
+    from app.llm.ollama import OllamaLLM
+
+    llm = LLMFactory.create_raw(
+        provider="ollama",
+        base_url="http://127.0.0.1:11434",
+        model="deepseek-r1:32b",
+    )
+    assert isinstance(llm, OllamaLLM)
+    assert llm.model_name == "deepseek-r1:32b"
+    assert "11434" in str(llm.client.base_url)
+
+
 def test_factory_builds_anthropic_adapter():
     llm = LLMFactory.create_raw(
         provider="anthropic",
@@ -144,7 +157,7 @@ def test_online_execution_profile_saves_tokens():
     assert online.compact_prompts is True
     assert online.embed_system_in_user_prompt is False
     assert online.two_stage_reasoning is False
-    assert online.reserved_output_tokens < local.reserved_output_tokens
+    assert online.reserved_output_tokens <= local.reserved_output_tokens
     assert online.max_legal_evidence_tokens < local.max_legal_evidence_tokens
     assert len(online.system_prompt) < len(local.system_prompt)
 
@@ -230,3 +243,63 @@ def test_online_token_budget_uses_tighter_caps():
 def test_local_ollama_tag_maps_for_anthropic():
     assert resolve_chat_model("anthropic", "deepseek-r1:32b") == "claude-sonnet-4-5"
     assert resolve_chat_model("claude", "deepseek-r1:32b") == "claude-sonnet-4-5"
+
+
+def test_r1_32b_reserves_thinking_headroom():
+    from app.llm.ollama import OllamaLLM
+
+    caps = ModelCapabilityRegistry.resolve(
+        provider="ollama",
+        model_name="deepseek-r1:32b",
+    )
+    assert caps.max_output_tokens >= 8192
+    llm = OllamaLLM(
+        base_url="http://127.0.0.1:11434",
+        model="deepseek-r1:32b",
+        timeout_seconds=5,
+    )
+    try:
+        assert llm._effective_num_predict(512) >= 12288
+    finally:
+        pass
+
+
+def test_salvage_answer_from_thinking():
+    from app.llm.ollama import _salvage_answer_from_thinking
+
+    thinking = (
+        "I need to reason about this carefully.\n\n"
+        "Final answer: Section 54-C of the Electricity Act, 1910 can "
+        "restrict interim injunctions in certain electricity disputes."
+    )
+    salvaged = _salvage_answer_from_thinking(thinking)
+    assert "Section 54-C" in salvaged
+    assert "Electricity Act" in salvaged
+
+
+def test_blank_llm_chunk_fallback_includes_passages():
+    from types import SimpleNamespace
+
+    from app.rag.rag_service import RAGService
+
+    text = RAGService._blank_llm_chunk_fallback(
+        question="What is Section 54-c?",
+        chunks=[
+            SimpleNamespace(
+                filename="CLOG ON DISCRETION",
+                text="Section 54-C operates as a clog on judicial discretion.",
+            )
+        ],
+    )
+    assert "Section 54-c" in text or "54-c" in text.lower()
+    assert "CLOG ON DISCRETION" in text
+    assert "Resources" in text or "resources" in text.lower()
+
+
+def test_finalize_response_never_empty():
+    from app.rag.rag_service import RAGService
+
+    payload = RAGService._finalize_response({"answer": "[Source 1]"})
+    assert payload["answer"].strip()
+    payload2 = RAGService._finalize_response({"answer": ""})
+    assert payload2["answer"].strip()

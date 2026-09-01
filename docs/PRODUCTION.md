@@ -82,10 +82,25 @@ Copy `.env.example`. Required production values:
 - `LOG_STORE_CHAT_BODIES=false`
 - Hosted chat: `LLM_PROVIDER=gemini`, `CHAT_MODEL=gemini-3.6-flash`,
   `LLM_API_KEY=...`, `LLM_TIMEOUT=120`
-- Embeddings stay local nomic: `EMBEDDING_PROVIDER=ollama`,
+- Local chat: `LLM_PROVIDER=ollama`, `OLLAMA_MODEL=deepseek-r1:32b`
+  (or `CHAT_MODEL=deepseek-r1:32b`), `LLM_TIMEOUT=3600`
+- Temporary CPU-server testing: `LLM_PROVIDER=openrouter`,
+  `OPENROUTER_API_KEY=...`, `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`,
+  `OPENROUTER_MODEL=openrouter/free`, `LLM_TIMEOUT=120`. Switch to a paid
+  OpenRouter model by changing `OPENROUTER_MODEL` only.
+- **Server without local models** (no Ollama, no HF/fastembed download):
+  `EMBEDDING_ONLINE_ONLY=true`, `EMBEDDING_PROVIDER=fireworks`,
+  `EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5`, `FIREWORKS_API_KEY=...`
+  (768-d cloud API; matches existing `legal_documents` index). Chat stays on
+  OpenRouter or another online `LLM_PROVIDER`. Do **not** use
+  `EMBEDDING_PROVIDER=huggingface` on that host — it downloads the ONNX model.
+- Embeddings with local Ollama (legacy): `EMBEDDING_PROVIDER=ollama`,
   `EMBEDDING_MODEL=nomic-embed-text:latest`, `EMBEDDING_URL=http://127.0.0.1:11434`
 - `TRUST_FORWARDED_FOR=true` only because Uvicorn binds to `127.0.0.1`
 - `UPLOAD_DIR=/var/lib/legal-chatbot/documents`
+- Optional internet search: `WEB_SEARCH_ENABLED=true`,
+  `WEB_SEARCH_PROVIDER=auto`. Prefer `TAVILY_API_KEY` or `BRAVE_API_KEY`;
+  without a key the app falls back to DuckDuckGo HTML search.
 
 Do not set `TRUSTED_HOSTS=*`. Do not put real secrets in git.
 
@@ -196,8 +211,12 @@ ollama pull nomic-embed-text
 ```
 
 Local DeepSeek chat remains supported for offline development
-(`LLM_PROVIDER=ollama`, `CHAT_MODEL=deepseek-r1:32b`, `LLM_TIMEOUT=1800`).
-Do not use that 1800-second timeout for hosted Gemini.
+(`LLM_PROVIDER=ollama`, `OLLAMA_MODEL=deepseek-r1:32b` or
+`CHAT_MODEL=deepseek-r1:32b`, `LLM_TIMEOUT=3600`).
+Do not use that 3600-second timeout for hosted Gemini. R1 32B often
+thinks for many minutes before the first answer token; keep Nginx
+`proxy_read_timeout` at least as high, and prefer `/chat/stream` so
+SSE keepalives hold the connection.
 
 ## 6. Nginx + HTTPS (CloudPanel)
 
@@ -218,7 +237,8 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;
-        proxy_read_timeout 300s;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
     }
 }
 ```

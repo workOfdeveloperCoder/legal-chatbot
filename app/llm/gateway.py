@@ -11,6 +11,7 @@ import httpx
 
 from app.core.config import settings
 from app.llm.base import BaseLLM
+from app.llm.delta import StreamDelta, coerce_delta
 from app.llm.errors import (
     LLMAllProvidersFailed,
     LLMCancelledError,
@@ -159,13 +160,13 @@ class LLMGateway(BaseLLM):
     async def generate_stream(
         self,
         request: ChatCompletionRequest,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[str | StreamDelta]:
         # Streaming uses primary only for now; retries remain non-stream.
         try:
             async for piece in self._primary.generate_stream(request):
-                cleaned = (piece or "").strip()
-                if cleaned:
-                    yield piece
+                delta = coerce_delta(piece)
+                if delta.text:
+                    yield delta
         except asyncio.CancelledError as exc:
             raise LLMCancelledError() from exc
         except LLMError:
@@ -173,8 +174,9 @@ class LLMGateway(BaseLLM):
                 raise
             self.last_stats.fallback_used = True
             async for piece in self._fallback.generate_stream(request):
-                if piece:
-                    yield piece
+                delta = coerce_delta(piece)
+                if delta.text:
+                    yield delta
 
     async def aclose(self) -> None:
         await self._primary.aclose()
@@ -227,6 +229,9 @@ class LLMGateway(BaseLLM):
                         "error": "timeout",
                     }
                 )
+                # A local R1 call can already take tens of minutes; retrying
+                # the same timeout would double the wait then still 503.
+                break
             except httpx.TimeoutException as exc:
                 last_error = LLMTransientError(f"{label} HTTP timeout: {exc}")
                 stats.attempts.append(
@@ -237,6 +242,7 @@ class LLMGateway(BaseLLM):
                         "error": "http_timeout",
                     }
                 )
+                break
             except httpx.TransportError as exc:
                 last_error = LLMTransientError(f"{label} transport: {exc}")
                 stats.attempts.append(

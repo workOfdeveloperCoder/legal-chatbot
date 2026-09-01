@@ -186,6 +186,7 @@ def select_evidence(
         SourceType.LEGAL.value: [],
         SourceType.CONVERSATION.value: [],
         SourceType.MATTER.value: [],
+        SourceType.WEB.value: [],
     }
 
     for chunk in sorted(chunks, key=_chunk_score, reverse=True):
@@ -195,10 +196,12 @@ def select_evidence(
         by_type[source_type].append(chunk)
 
     selected: list[RetrievedChunk] = []
+    web_limit = max(0, min(4, limit - legal_limit))
     tier_limits = (
         (SourceType.LEGAL.value, legal_limit),
         (SourceType.CONVERSATION.value, conversation_limit),
         (SourceType.MATTER.value, matter_limit),
+        (SourceType.WEB.value, web_limit or 3),
     )
 
     for source_type, tier_limit in tier_limits:

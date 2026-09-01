@@ -727,20 +727,17 @@ def _urdu_style_from_script(
 
 INSUFFICIENT_EVIDENCE = {
     ResponseStyle.ENGLISH: (
-        "I could not find sufficient authoritative material in the available "
-        "legal sources to give a definitive answer on this point.\n\n"
-        "The retrieved material does not contain enough authoritative legal "
-        "authority to support a confident legal conclusion. Please verify "
-        "against the applicable statute, rules, or binding case law, or "
-        "provide additional context or documents."
+        "No matching document or corpus passage was found for this question.\n\n"
+        "I could not locate sufficient retrieved legal material to give a "
+        "document-grounded answer. Please add a statute/section reference or "
+        "upload a document, or ask again for general legal guidance that will "
+        "be clearly marked as not authority-backed."
     ),
     ResponseStyle.ROMAN_URDU: (
-        "Available legal sources mein is point par definitive jawab ke liye "
-        "kaafi authoritative material nahi mila.\n\n"
-        "Retrieved material se confident legal conclusion support nahi hota. "
-        "Barah-e-karam applicable statute, rules, ya binding case law se "
-        "verify karein, ya mazeed context/documents dein. Legal terms, "
-        "section numbers, aur citations ko confirm karna zaroori hai."
+        "Is sawaal ke liye koi matching document/corpus passage nahi mila.\n\n"
+        "Document-grounded jawab ke liye kaafi retrieved material nahi. "
+        "Statute/section ya upload dein, ya dobara poochhein — general "
+        "guidance clearly mark ho gi ke yeh authority-backed nahi."
     ),
     ResponseStyle.URDU_SCRIPT: (
         "دستیاب قانونی ذرائع میں اس نکتہ پر حتمی جواب کے لیے کافی مستند "

@@ -30,6 +30,7 @@ from app.repositories.user_repository import UserRepository
 
 from app.services.activity_log_service import ActivityLogService
 from app.services.chat_service import ChatService
+from app.services.contract_analysis_service import ContractAnalysisService
 from app.services.conversation_service import ConversationService
 from app.services.document_service import DocumentService
 from app.services.error_log_service import ErrorLogService
@@ -236,6 +237,17 @@ def get_token_usage_service(
     return TokenUsageService(llm=llm)
 
 
+def get_contract_analysis_service(
+    llm: BaseLLM = Depends(get_llm),
+    db: AsyncSession = Depends(get_db),
+) -> ContractAnalysisService:
+    return ContractAnalysisService(
+        llm=llm,
+        documents=DocumentRepository(db),
+        matters=MatterRepository(db),
+    )
+
+
 # ---------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------
@@ -247,6 +259,9 @@ def get_chat_service(
     memory_service: MemoryService = Depends(get_memory_service),
     query_router: QueryRouter = Depends(get_query_router),
     activity_log_service: ActivityLogService = Depends(get_activity_log_service),
+    contract_analysis: ContractAnalysisService = Depends(
+        get_contract_analysis_service
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> ChatService:
 
@@ -258,5 +273,6 @@ def get_chat_service(
         query_router=query_router,
         document_repository=DocumentRepository(db),
         activity_log_service=activity_log_service,
+        contract_analysis=contract_analysis,
     )
 

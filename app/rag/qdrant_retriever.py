@@ -59,11 +59,21 @@ class QdrantRetriever(BaseRetriever):
         document_id: str | None = None,
         limit: int | None = None,
         filters: dict[str, str] | None = None,
+        prefer_legal_corpus: bool = False,
     ) -> RetrievalOutcome:
         task_name = _task_value(task)
         document_scoped = task_name in _DOCUMENT_TASKS and bool(document_id)
         skip_legal_corpus = (
             task_name in _DOCUMENT_TASKS
+            and task_name not in _MIXED_TASKS
+        )
+        # Legal research: answer from legal_documents first; skip private
+        # uploads unless the user scoped a document or mixed-doc task.
+        corpus_only = (
+            prefer_legal_corpus
+            and not document_scoped
+            and not skip_legal_corpus
+            and not document_id
             and task_name not in _MIXED_TASKS
         )
 
@@ -72,7 +82,11 @@ class QdrantRetriever(BaseRetriever):
         conversation_limit = settings.RETRIEVAL_CONVERSATION_LIMIT
         matter_limit = settings.RETRIEVAL_MATTER_LIMIT
 
-        if skip_legal_corpus and not document_scoped:
+        if corpus_only:
+            legal_limit = max(legal_limit, min(total_limit, legal_limit + 2))
+            conversation_limit = 0
+            matter_limit = 0
+        elif skip_legal_corpus and not document_scoped:
             legal_limit = 0
             matter_limit = max(matter_limit, 6)
             conversation_limit = min(conversation_limit, 2)
@@ -81,9 +95,29 @@ class QdrantRetriever(BaseRetriever):
             filters_applied=dict(filters or {}),
         )
 
+        if not settings.qdrant_embedding_compatible:
+            logger.warning(
+                "Skipping Qdrant search: embedding model %s is not nomic-compatible "
+                "with the %s-d legal corpus index",
+                settings.EMBEDDING_MODEL,
+                settings.VECTOR_SIZE,
+            )
+            metadata.degraded_sources.append("qdrant_embedding_model")
+            return await finalize_retrieval(
+                query=query,
+                chunks=[],
+                filters=filters,
+                metadata=metadata,
+                limit=total_limit,
+                legal_limit=legal_limit,
+                conversation_limit=conversation_limit,
+                matter_limit=matter_limit,
+            )
+
         logger.info(
             "Tiered Qdrant search user=%s matter=%s conversation=%s "
-            "document_id=%s task=%s document_scoped=%s skip_legal=%s",
+            "document_id=%s task=%s document_scoped=%s skip_legal=%s "
+            "prefer_legal_corpus=%s corpus_only=%s legal_collection=%s",
             user_id,
             matter_id,
             conversation_id,
@@ -91,6 +125,9 @@ class QdrantRetriever(BaseRetriever):
             task_name,
             document_scoped,
             skip_legal_corpus,
+            prefer_legal_corpus,
+            corpus_only,
+            qdrant_service.legal_collection,
         )
 
         vector = await self.embedding.embed_query(query)
@@ -132,18 +169,19 @@ class QdrantRetriever(BaseRetriever):
                     metadata=metadata,
                 )
             )
-            tier_chunks.extend(
-                await self._search_private_tiers(
-                    vector=vector,
-                    user_id=user_id,
-                    matter_id=matter_id,
-                    conversation_id=conversation_id,
-                    legal_limit=0,
-                    conversation_limit=conversation_limit,
-                    matter_limit=matter_limit,
-                    metadata=metadata,
+            if not corpus_only:
+                tier_chunks.extend(
+                    await self._search_private_tiers(
+                        vector=vector,
+                        user_id=user_id,
+                        matter_id=matter_id,
+                        conversation_id=conversation_id,
+                        legal_limit=0,
+                        conversation_limit=conversation_limit,
+                        matter_limit=matter_limit,
+                        metadata=metadata,
+                    )
                 )
-            )
 
         return await finalize_retrieval(
             query=query,
@@ -267,6 +305,21 @@ class QdrantRetriever(BaseRetriever):
                     source_type=SourceType.MATTER.value,
                     metadata=metadata,
                     degrade_key=SourceType.MATTER.value,
+                )
+            )
+            # Conversation uploads stamped with this matter (sibling threads).
+            tasks.append(
+                self._search_collection(
+                    vector=vector,
+                    collection=qdrant_service.document_collection,
+                    qdrant_filter=QdrantFilterBuilder.matter_linked_conversation_documents(
+                        user_id=user_id,
+                        matter_id=matter_id,
+                    ),
+                    limit=max(conversation_limit, matter_limit),
+                    source_type=SourceType.CONVERSATION.value,
+                    metadata=metadata,
+                    degrade_key=SourceType.CONVERSATION.value,
                 )
             )
 

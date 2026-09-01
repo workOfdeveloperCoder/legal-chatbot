@@ -39,7 +39,7 @@ _MODEL_PROFILES: dict[str, ModelCapabilities] = {
         model_name="deepseek-r1:32b",
         provider="ollama",
         context_window=32768,
-        max_output_tokens=4096,
+        max_output_tokens=16384,
         tokenizer_id="cl100k_base",
         input_price_per_1m=0.0,
         output_price_per_1m=0.0,
@@ -202,6 +202,27 @@ _MODEL_PROFILES: dict[str, ModelCapabilities] = {
         supports_temperature=False,
         uses_max_completion_tokens=True,
     ),
+    "minimax/minimax-m2.7": ModelCapabilities(
+        model_name="minimax/minimax-m2.7",
+        provider="openrouter",
+        context_window=196608,
+        max_output_tokens=16384,
+        tokenizer_id="cl100k_base",
+        input_price_per_1m=0.0,
+        output_price_per_1m=0.0,
+        returns_usage=True,
+        uses_max_completion_tokens=True,
+    ),
+    "nvidia/nemotron-3.5-lightning:free": ModelCapabilities(
+        model_name="nvidia/nemotron-3.5-lightning:free",
+        provider="openrouter",
+        context_window=131072,
+        max_output_tokens=8192,
+        tokenizer_id="cl100k_base",
+        input_price_per_1m=0.0,
+        output_price_per_1m=0.0,
+        returns_usage=True,
+    ),
 }
 
 
@@ -214,6 +235,12 @@ def _unknown_online_defaults(provider: str) -> tuple[int, str]:
     return settings.TOKEN_DEFAULT_CONTEXT_WINDOW, (
         settings.TOKEN_TOKENIZER_ID or "cl100k_base"
     )
+
+
+def _is_openai_reasoning_model(model_name: str) -> bool:
+    """o1/o3/o4-style models. Do not treat 'openrouter/...' as reasoning."""
+    stem = model_name.strip().lower().rsplit("/", 1)[-1]
+    return stem.startswith(("o1", "o3", "o4"))
 
 
 class ModelCapabilityRegistry:
@@ -258,8 +285,8 @@ class ModelCapabilityRegistry:
                 output_price_per_1m=None,
                 returns_usage=provider_name == "ollama"
                 or is_online_provider(provider_name),
-                uses_max_completion_tokens=model.lower().startswith("o"),
-                supports_temperature=not model.lower().startswith("o"),
+                uses_max_completion_tokens=_is_openai_reasoning_model(model),
+                supports_temperature=not _is_openai_reasoning_model(model),
                 tokenizer_native=provider_name != "gemini",
             )
             known = False

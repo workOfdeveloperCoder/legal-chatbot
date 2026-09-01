@@ -207,18 +207,36 @@ class VectorService:
 
 
         logger.info(
-
             "Document indexed document=%s chunks=%s user=%s",
-
             document_id,
-
             len(points),
-
             owner_id,
-
         )
 
-
+    async def set_document_matter_id(
+        self,
+        *,
+        document_id: str,
+        owner_id: str,
+        matter_id: str | None,
+    ) -> None:
+        """Update matter_id on existing Qdrant payloads (no re-embed)."""
+        await qdrant_service.client.set_payload(
+            collection_name=self.collection,
+            payload={"matter_id": matter_id},
+            points=Filter(
+                must=[
+                    FieldCondition(
+                        key="document_id",
+                        match=MatchValue(value=document_id),
+                    ),
+                    FieldCondition(
+                        key="user_id",
+                        match=MatchValue(value=owner_id),
+                    ),
+                ]
+            ),
+        )
 
     # ==================================================
     # Delete Document Vectors

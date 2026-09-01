@@ -97,11 +97,16 @@ class MemoryService:
 
             return []
 
-
-
-        vector = await self.embedding.embed_query(
-            query
-        )
+        try:
+            vector = await self.embedding.embed_query(
+                query
+            )
+        except Exception:
+            logger.exception(
+                "Memory embedding failed user=%s; continuing without memories",
+                user_id,
+            )
+            return []
 
 
 
@@ -135,17 +140,24 @@ class MemoryService:
 
 
 
-        result = await self.client.query_points(
+        try:
+            result = await self.client.query_points(
 
-            collection_name=self.collection,
+                collection_name=self.collection,
 
-            query=vector,
+                query=vector,
 
-            query_filter=memory_filter,
+                query_filter=memory_filter,
 
-            limit=limit,
+                limit=limit,
 
-        )
+            )
+        except Exception:
+            logger.exception(
+                "Memory search failed user=%s; continuing without memories",
+                user_id,
+            )
+            return []
 
 
 

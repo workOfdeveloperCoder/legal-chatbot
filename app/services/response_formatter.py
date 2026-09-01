@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.core.config import settings
 from app.rag.answer_guard import (
     CitationValidationResult,
     EvidenceStrength,
@@ -38,6 +39,14 @@ class ResponseFormatter:
 
     EXCERPT_LIMIT = 800
 
+    @staticmethod
+    def _without_web_chunks(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+        return [
+            chunk
+            for chunk in chunks
+            if getattr(chunk, "source_type", None) != SourceType.WEB.value
+        ]
+
     def format(
         self,
         *,
@@ -62,24 +71,59 @@ class ResponseFormatter:
         llm_execution: dict[str, object] | None = None,
         conversation_context: dict[str, object] | None = None,
         language: dict[str, object] | None = None,
+        include_web: bool = False,
     ) -> dict:
 
-        raw_sources = self._build_sources(chunks)
-        sources = (
-            self._prepare_display_sources(
+        display_chunks = (
+            chunks
+            if include_web
+            else self._without_web_chunks(chunks)
+        )
+
+        raw_sources = self._build_sources(display_chunks)
+        if build_resources:
+            legal_raw = [
+                source
+                for source in raw_sources
+                if (source.source_type or "") == SourceType.LEGAL.value
+            ]
+            resource_pool = (
+                legal_raw
+                if legal_raw and not include_web
+                else raw_sources
+            )
+            # Resources panel: show retrieved corpus hits (Web off), not only
+            # whatever the model happened to cite.
+            resource_sources = self._prepare_display_sources(
+                resource_pool,
+                sources_used=None,
+                include_all_qdrant=not include_web,
+            )
+            sources = self._prepare_display_sources(
                 raw_sources,
                 sources_used=sources_used,
+                include_all_qdrant=False,
             )
-            if build_resources
-            else raw_sources
-        )
-        resources = (
-            self._build_resources(sources)
-            if build_resources
-            else []
-        )
+            resources = self._build_resources(
+                resource_sources,
+                include_web=include_web,
+            )
+        else:
+            sources = raw_sources
+            resources = []
+        if not include_web:
+            sources = [
+                source
+                for source in sources
+                if (source.source_type or "") != SourceType.WEB.value
+            ]
+            resources = [
+                resource
+                for resource in resources
+                if (resource.source_type or "") != SourceType.WEB.value
+            ]
         citations = self._build_citations(
-            chunks,
+            display_chunks,
             sources_used=sources_used,
         )
 
@@ -106,11 +150,27 @@ class ResponseFormatter:
                 and raw_sources[index - 1].source_type
                 == SourceType.MATTER.value
             )
+            web_used = (
+                sum(
+                    1
+                    for index in (sources_used or [])
+                    if 1 <= index <= len(raw_sources)
+                    and raw_sources[index - 1].source_type
+                    == SourceType.WEB.value
+                )
+                if include_web
+                else 0
+            )
 
             metadata_response = RetrievalMetadataResponse(
                 legal_chunks=retrieval_metadata.legal_chunks,
                 conversation_chunks=retrieval_metadata.conversation_chunks,
                 matter_chunks=retrieval_metadata.matter_chunks,
+                web_chunks=(
+                    getattr(retrieval_metadata, "web_chunks", 0)
+                    if include_web
+                    else 0
+                ),
                 total_selected=retrieval_metadata.total_selected,
                 collections_queried=list(
                     retrieval_metadata.collections_queried
@@ -130,6 +190,7 @@ class ResponseFormatter:
                 legal_sources_used=legal_used,
                 conversation_sources_used=conversation_used,
                 matter_sources_used=matter_used,
+                web_sources_used=web_used,
                 citation_validation_status=(
                     citation_validation.status.value
                     if citation_validation is not None
@@ -148,7 +209,7 @@ class ResponseFormatter:
 
         return {
             "answer": self._clean_answer(answer),
-            "chunks": chunks,
+            "chunks": display_chunks,
             "citations": citations,
             "sources": sources,
             "resources": resources,
@@ -215,6 +276,7 @@ class ResponseFormatter:
                     excerpt=self._excerpt(chunk.text),
                     text=chunk.text,
                     source_reference=build_source_reference(chunk),
+                    url=getattr(chunk, "url", None),
                     relevance=round(float(relevance), 4),
                     matter_id=chunk.matter_id,
                     conversation_id=chunk.conversation_id,
@@ -232,10 +294,12 @@ class ResponseFormatter:
         sources: list[SourceReference],
         *,
         sources_used: list[int] | None = None,
+        include_all_qdrant: bool = False,
     ) -> list[SourceReference]:
         filtered = self._filter_sources_for_display(
             sources,
             sources_used=sources_used,
+            include_all_qdrant=include_all_qdrant,
         )
         return self._dedupe_sources_by_chunk_identity(filtered)
 
@@ -244,28 +308,45 @@ class ResponseFormatter:
         sources: list[SourceReference],
         *,
         sources_used: list[int] | None = None,
+        include_all_qdrant: bool = False,
     ) -> list[SourceReference]:
         """
         Keep only sources that support the answer.
 
-        Prefer cited sources. If the model cited nothing, keep only the
-        strongest retrieved evidence — never dump every retrieved chunk.
+        Prefer cited sources. If the model cited nothing, keep the strongest
+        retrieved evidence. When include_all_qdrant is True (Web off), surface
+        all Qdrant tiers up to the retrieval limit — not just the top 3.
         """
-        if sources_used:
+        qdrant_only = [
+            source
+            for source in sources
+            if (source.source_type or "") != SourceType.WEB.value
+        ]
+        pool = qdrant_only if include_all_qdrant else sources
+
+        if sources_used and not include_all_qdrant:
             used = set(sources_used)
             filtered = [
                 source
-                for source in sources
+                for source in pool
                 if source.source_number in used
             ]
             if filtered:
                 return filtered
 
-        if not sources:
+        if not pool:
             return []
 
+        if include_all_qdrant:
+            ranked = sorted(
+                pool,
+                key=lambda source: source.relevance,
+                reverse=True,
+            )
+            return ranked[: settings.RETRIEVAL_LIMIT]
+
         ranked = sorted(
-            sources,
+            pool,
             key=lambda source: source.relevance,
             reverse=True,
         )
@@ -341,6 +422,8 @@ class ResponseFormatter:
     def _build_resources(
         self,
         sources: list[SourceReference],
+        *,
+        include_web: bool = False,
     ) -> list[ResourceReference]:
         """
         Canonical resource builder.
@@ -350,6 +433,13 @@ class ResponseFormatter:
         - Multiple chunks → multiple evidence items under that resource
         """
         grouped: dict[str, list[SourceReference]] = {}
+
+        if not include_web:
+            sources = [
+                source
+                for source in sources
+                if (source.source_type or "") != SourceType.WEB.value
+            ]
 
         for source in sources:
             key = resource_identity_key(
@@ -426,6 +516,7 @@ class ResponseFormatter:
                     law_name=primary.law_name,
                     court=primary.court,
                     year=primary.year,
+                    url=getattr(primary, "url", None),
                     source_ids=[item.id for item in items],
                     source_numbers=[item.source_number for item in items],
                     evidence=evidence,
@@ -642,6 +733,7 @@ class ResponseFormatter:
                     chunk_id=chunk.chunk_id or chunk.id,
                     page=chunk.page_number,
                     source_reference=build_source_reference(chunk),
+                    url=getattr(chunk, "url", None),
                     matter_id=chunk.matter_id,
                     conversation_id=chunk.conversation_id,
                     display_name=chunk.display_name,

@@ -8,6 +8,7 @@ from app.api.v1.matters import router as matters_router
 from app.api.v1.chat import router as chats_router
 from app.api.v1.conversations import router as conversations_router
 from app.api.v1.documents import router as document_router
+from app.api.v1.contracts import router as contracts_router
 from app.api.v1.logs import router as logs_router
 from app.api.v1.voice import router as voice_router
 from app.api.v1.llm import router as llm_router
@@ -101,6 +102,11 @@ app.include_router(
 
 app.include_router(
     document_router,
+    prefix="/api/v1",
+)
+
+app.include_router(
+    contracts_router,
     prefix="/api/v1",
 )
 

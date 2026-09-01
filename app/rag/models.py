@@ -12,6 +12,7 @@ class SourceType(str, Enum):
     LEGAL = "legal"
     CONVERSATION = "conversation"
     MATTER = "matter"
+    WEB = "web"
 
 
 class MemoryScope(str, Enum):
@@ -314,6 +315,7 @@ class RetrievedChunk(BaseModel):
     publication_year: int | None = None
     chunk_role: str | None = None
     embedded: bool | None = None
+    url: str | None = None
 
 
 class RetrievalMetadata(BaseModel):
@@ -322,6 +324,7 @@ class RetrievalMetadata(BaseModel):
     legal_chunks: int = 0
     conversation_chunks: int = 0
     matter_chunks: int = 0
+    web_chunks: int = 0
     total_selected: int = 0
     collections_queried: list[str] = Field(default_factory=list)
     degraded_sources: list[str] = Field(default_factory=list)

@@ -267,7 +267,16 @@ class ConversationService:
             conversation_id=conversation_id,
         )
 
-        conversation.title = title.strip()
+        cleaned = (title or "").strip()
+        if not cleaned:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Title cannot be empty.",
+            )
+        if len(cleaned) > 120:
+            cleaned = cleaned[:117] + "..."
+
+        conversation.title = cleaned
 
         await self.db.commit()
 

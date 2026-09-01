@@ -206,6 +206,50 @@ class QdrantFilterBuilder:
 
 
         # ----------------------------------
+        # Conversation documents linked to matter
+        # ----------------------------------
+
+        if matter_id:
+
+            visibility.append(
+
+                Filter(
+
+                    must=[
+
+                        FieldCondition(
+
+                            key="scope",
+
+                            match=MatchValue(
+
+                                value="conversation"
+
+                            ),
+
+                        ),
+
+                        FieldCondition(
+
+                            key="matter_id",
+
+                            match=MatchValue(
+
+                                value=matter_id
+
+                            ),
+
+                        ),
+
+                    ]
+
+                )
+
+            )
+
+
+
+        # ----------------------------------
         # Conversation documents
         # ----------------------------------
 
@@ -410,6 +454,30 @@ class QdrantFilterBuilder:
                 FieldCondition(
                     key="scope",
                     match=MatchValue(value="matter"),
+                ),
+                FieldCondition(
+                    key="matter_id",
+                    match=MatchValue(value=matter_id),
+                ),
+            ]
+        )
+
+    @staticmethod
+    def matter_linked_conversation_documents(
+        *,
+        user_id: str,
+        matter_id: str,
+    ) -> Filter:
+        """Conversation-scoped uploads that inherit a matter_id (matter-wide)."""
+        return Filter(
+            must=[
+                FieldCondition(
+                    key="user_id",
+                    match=MatchValue(value=user_id),
+                ),
+                FieldCondition(
+                    key="scope",
+                    match=MatchValue(value="conversation"),
                 ),
                 FieldCondition(
                     key="matter_id",

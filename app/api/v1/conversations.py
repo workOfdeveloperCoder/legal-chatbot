@@ -12,6 +12,7 @@ from app.schemas.conversation import (
     ConversationListResponse,
     ConversationResponse,
     CreateConversationRequest,
+    UpdateConversationRequest,
 )
 from app.schemas.message import MessageResponse
 from app.services.conversation_service import ConversationService
@@ -126,4 +127,46 @@ async def get_conversation(
             MessageResponse.model_validate(message)
             for message in messages
         ],
+    )
+
+
+@router.patch(
+    "/{conversation_id}",
+    response_model=ConversationResponse,
+)
+async def update_conversation(
+    conversation_id: UUID,
+    payload: UpdateConversationRequest,
+    current_user: User = Depends(get_current_active_user),
+    service: ConversationService = Depends(get_conversation_service),
+):
+    conversation = await service.rename(
+        user=current_user,
+        conversation_id=conversation_id,
+        title=payload.title,
+    )
+    if payload.is_pinned is not None:
+        conversation.is_pinned = payload.is_pinned
+        await service.db.commit()
+        await service.db.refresh(conversation)
+
+    last = await service.messages.get_last_message(conversation.id)
+    return _to_list_item(
+        conversation,
+        last_message=last.content if last else None,
+    )
+
+
+@router.delete(
+    "/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_conversation(
+    conversation_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    service: ConversationService = Depends(get_conversation_service),
+):
+    await service.delete(
+        user=current_user,
+        conversation_id=conversation_id,
     )

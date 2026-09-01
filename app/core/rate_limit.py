@@ -38,7 +38,7 @@ _limiter = SlidingWindowLimiter()
 def _bucket_for_path(path: str) -> tuple[str, int]:
     if path.startswith("/api/v1/auth"):
         return "auth", settings.RATE_LIMIT_AUTH_PER_MINUTE
-    if path.startswith("/api/v1/chat"):
+    if path.startswith("/api/v1/chat") or path.startswith("/api/v1/contracts"):
         return "chat", settings.RATE_LIMIT_CHAT_PER_MINUTE
     if "/upload" in path or path.startswith("/api/v1/documents"):
         return "upload", settings.RATE_LIMIT_UPLOAD_PER_MINUTE

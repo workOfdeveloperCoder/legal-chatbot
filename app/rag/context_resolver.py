@@ -13,7 +13,16 @@ _FOLLOWUP_PATTERN = re.compile(
     r"^(?:what about|how about|and what|does this apply|what if|"
     r"which section|show me where|compare this|and for|"
     r"does that apply|what happens if|can it be|can this be|"
-    r"can that be|is it|is this)\b",
+    r"can that be|is it|is this|"
+    r"what(?:'s| is| are| was| were)? (?:this|that|it|these|those)|"
+    r"what does (?:this|that|it) mean|"
+    r"what do you mean|"
+    r"explain (?:this|that|it|more|further)|"
+    r"tell me more|clarify|elaborate|"
+    r"in (?:simple|plain) words|simplify|"
+    r"same for|and (?:this|that)|"
+    r"yeh? kya hai|ye kia hai|iska matlab|uska matlab|"
+    r"aur batao|thora detail)\b",
     re.IGNORECASE,
 )
 
@@ -32,7 +41,8 @@ _TOPIC_PATTERN = re.compile(
     r"inheritance|injunction|recovery|arbitration|"
     r"constitutional petition|specific performance|"
     r"limitation period|double jeopardy|discretion|"
-    r"unreasonableness|clog|54-c|54 c)\b",
+    r"unreasonableness|clog|54-c|54 c|"
+    r"sections?|articles?|clauses?|provisions?|statute|legislation)\b",
     re.IGNORECASE,
 )
 
@@ -108,11 +118,18 @@ class ContextResolver:
     def _is_followup(question: str) -> bool:
         if _FOLLOWUP_PATTERN.search(question):
             return True
-        lower = question.lower().strip("?. ")
+        lower = question.lower().strip("?.! ")
         if lower.startswith(("and ", "but ", "also ")):
             return True
         words = lower.split()
         if len(words) <= 8 and _TOPIC_PATTERN.search(lower):
+            return True
+        # Pronoun / demonstrative replies that depend on prior turns.
+        if len(words) <= 12 and re.search(
+            r"\b(?:this|that|it|these|those|above|previous|"
+            r"yeh?|ye|woh|iska|uska|matlab)\b",
+            lower,
+        ):
             return True
         return False
 
@@ -135,15 +152,22 @@ class ContextResolver:
         for message in reversed(recent):
             if message.role == "user":
                 cleaned = message.content.strip()
-                if len(cleaned) > 15:
-                    return cleaned[:120].rstrip()
+                if len(cleaned) > 8:
+                    return cleaned[:160].rstrip()
+                break
+
+        for message in reversed(recent):
+            if message.role == "assistant":
+                cleaned = message.content.strip()
+                if len(cleaned) > 40:
+                    return cleaned[:160].rstrip()
                 break
 
         return None
 
     @staticmethod
     def _compose_contextual_query(question: str, topic: str) -> str:
-        lower = question.lower().strip("?. ")
+        lower = question.lower().strip("?.! ")
 
         if lower.startswith(("can it ", "can this ", "can that ")):
             action = re.sub(
@@ -151,7 +175,7 @@ class ContextResolver:
                 "",
                 lower,
                 flags=re.IGNORECASE,
-            ).strip("?. ")
+            ).strip("?.! ")
             return (
                 f"Can {action} relating to {topic} under Pakistan law"
             )
@@ -162,9 +186,18 @@ class ContextResolver:
                 "",
                 lower,
                 flags=re.IGNORECASE,
-            ).strip("?. ")
+            ).strip("?.! ")
             return (
                 f"{subject} relating to {topic} under Pakistan law"
             )
 
-        return f"{question.strip('?. ')} in the context of {topic} under Pakistan law"
+        if re.match(
+            r"what(?:'s| is| are| was| were)? (?:this|that|it)\b|"
+            r"what does (?:this|that|it) mean|"
+            r"explain (?:this|that|it)|"
+            r"yeh? kya hai|ye kia hai|iska matlab",
+            lower,
+        ):
+            return f"Explain {topic} under Pakistan law"
+
+        return f"{question.strip('?.! ')} in the context of {topic} under Pakistan law"

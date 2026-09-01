@@ -54,7 +54,11 @@ class OllamaEmbedding(BaseEmbedding):
                 "Ollama returned no embeddings."
             )
 
-        return embeddings[0]
+        vector = embeddings[0]
+        from app.embeddings.validation import assert_vector_size
+
+        assert_vector_size(vector, provider="ollama")
+        return vector
 
     async def embed_documents(
         self,
@@ -83,6 +87,10 @@ class OllamaEmbedding(BaseEmbedding):
                 "Ollama returned no embeddings."
             )
 
+        from app.embeddings.validation import assert_vector_size
+
+        for vector in embeddings:
+            assert_vector_size(vector, provider="ollama")
         return embeddings
 
     async def aclose(self) -> None:

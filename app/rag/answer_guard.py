@@ -65,12 +65,18 @@ class GuardedAnswerResult(BaseModel):
 
 
 INSUFFICIENT_EVIDENCE_ANSWER = (
-    "I could not find sufficient authoritative material in the available "
-    "legal sources to give a definitive answer on this point.\n\n"
-    "The retrieved material does not contain enough authoritative legal "
-    "authority to support a confident legal conclusion. Please verify "
-    "against the applicable statute, rules, or binding case law, or "
-    "provide additional context or documents."
+    "No matching document or corpus passage was found for this question.\n\n"
+    "I could not locate sufficient retrieved legal material to give a "
+    "document-grounded answer. Please rephrase with a statute name, "
+    "section number, or upload a document — or ask again so I can provide "
+    "general legal guidance clearly marked as not authority-backed."
+)
+
+NO_DOCUMENT_FOUND_PREFIX = (
+    "No matching document or corpus passage was found for this question. "
+    "The following is general legal guidance only — not grounded in "
+    "retrieved authorities or uploaded files — and should be verified by "
+    "counsel against primary sources before reliance.\n\n"
 )
 
 PARTIAL_EVIDENCE_PREFIX = (
@@ -815,6 +821,21 @@ class AnswerGuard:
                 source_count=source_count,
             )
 
+        if not (final_answer or "").strip():
+            # Never return a blank bubble when the model only emitted thinking.
+            fallback = self.build_insufficient_evidence_answer(
+                evidence_strength=evidence_strength,
+                has_private_sources=bool(chunks),
+            )
+            return GuardedAnswerResult(
+                answer=fallback,
+                citation_validation=validation,
+                grounding=GroundingResult(status=GroundingStatus.INSUFFICIENT),
+                evidence_strength=evidence_strength,
+                grounding_status=GroundingStatus.INSUFFICIENT,
+                sources_used=[],
+            )
+
         grounding = GroundingResult(status=GroundingStatus.STRONG)
         if not skip_grounding:
             grounding = self._claims.validate(
@@ -859,6 +880,9 @@ class AnswerGuard:
                 )
         elif grounding_status == GroundingStatus.INSUFFICIENT:
             final_answer = self._apply_insufficient_grounding(final_answer)
+        elif evidence_strength == EvidenceStrength.NONE and not chunks:
+            if not final_answer.lstrip().lower().startswith("no matching document"):
+                final_answer = NO_DOCUMENT_FOUND_PREFIX + final_answer
         elif grounding_status == GroundingStatus.PARTIAL:
             final_answer = self._strip_invented_authorities(
                 final_answer,
@@ -918,12 +942,14 @@ class AnswerGuard:
 
     @staticmethod
     def _apply_insufficient_grounding(answer: str) -> str:
-        return (
-            "I could not verify all legal propositions in this answer against "
-            "the retrieved evidence. The available sources do not fully "
-            "support the legal claims below.\n\n"
-            + answer
+        prefix = (
+            "No matching document or corpus passage fully supports every "
+            "legal proposition below. Treat this as provisional guidance "
+            "and verify against primary authorities before reliance.\n\n"
         )
+        if answer.lstrip().lower().startswith("no matching document"):
+            return answer
+        return prefix + answer
 
     @staticmethod
     def _apply_conflict_notice(answer: str) -> str:

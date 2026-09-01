@@ -18,6 +18,8 @@ class AuthorityType(str, Enum):
     ARTICLE_COMMENTARY = "article_commentary"
     CONVERSATION_DOCUMENT = "conversation_document"
     MATTER_DOCUMENT = "matter_document"
+    WEB_OFFICIAL = "web_official"
+    WEB_SEARCH = "web_search"
     UNKNOWN = "unknown"
 
 
@@ -35,6 +37,8 @@ AUTHORITY_RANK: dict[AuthorityType, int] = {
     AuthorityType.CONVERSATION_DOCUMENT: 28,
     AuthorityType.UPLOADED_DOCUMENT: 26,
     AuthorityType.ARTICLE_COMMENTARY: 20,
+    AuthorityType.WEB_OFFICIAL: 55,
+    AuthorityType.WEB_SEARCH: 15,
     AuthorityType.UNKNOWN: 10,
 }
 
@@ -86,6 +90,21 @@ def classify_authority(
     if any(token in court_name or token in doc_type for token in ("tribunal", "commission")):
         return AuthorityType.TRIBUNAL
 
+    if source == "web":
+        if (document_type or "").lower() == "official_web":
+            return AuthorityType.WEB_OFFICIAL
+        if any(
+            token in title or token in (filename or "").lower()
+            for token in (
+                "gov.pk",
+                "supremecourt",
+                "pakistan code",
+                "official",
+            )
+        ):
+            return AuthorityType.WEB_OFFICIAL
+        return AuthorityType.WEB_SEARCH
+
     if source == "legal":
         if any(token in doc_type for token in ("judgment", "case", "precedent")):
             return AuthorityType.OFFICIAL_LEGAL
@@ -112,6 +131,8 @@ def attribution_phrase(authority: AuthorityType) -> str:
         AuthorityType.UPLOADED_DOCUMENT: "The uploaded document states...",
         AuthorityType.CONVERSATION_DOCUMENT: "The uploaded document states...",
         AuthorityType.MATTER_DOCUMENT: "The matter document states...",
+        AuthorityType.WEB_OFFICIAL: "The official website states...",
+        AuthorityType.WEB_SEARCH: "An internet source states...",
         AuthorityType.UNKNOWN: "The available evidence indicates...",
     }
     return mapping[authority]

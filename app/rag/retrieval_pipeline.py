@@ -36,6 +36,9 @@ def build_source_reference(chunk: RetrievedChunk) -> str | None:
     if chunk.page_number:
         parts.append(f"page {chunk.page_number}")
 
+    if getattr(chunk, "url", None):
+        parts.append(str(chunk.url))
+
     if not parts and chunk.filename:
         parts.append(chunk.filename)
 
@@ -52,6 +55,8 @@ def enrich_chunk_metadata(chunk: RetrievedChunk) -> RetrievedChunk:
             updates["source_type"] = SourceType.CONVERSATION.value
         elif chunk.scope == "matter" or chunk.source == "matter_document":
             updates["source_type"] = SourceType.MATTER.value
+        elif chunk.source == "web" or chunk.source_type == SourceType.WEB.value:
+            updates["source_type"] = SourceType.WEB.value
         else:
             updates["source_type"] = SourceType.LEGAL.value
 
@@ -110,6 +115,9 @@ async def finalize_retrieval(
     )
     metadata.matter_chunks = sum(
         1 for c in selected if c.source_type == SourceType.MATTER.value
+    )
+    metadata.web_chunks = sum(
+        1 for c in selected if c.source_type == SourceType.WEB.value
     )
 
     return RetrievalOutcome(chunks=selected, metadata=metadata)
