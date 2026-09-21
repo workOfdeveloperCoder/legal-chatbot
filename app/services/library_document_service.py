@@ -22,12 +22,25 @@ def _chunk_body(payload: dict) -> str:
     return str(raw).strip()
 
 
-def _append_with_overlap(left: str, right: str, *, min_overlap: int = 40) -> str:
-    """
-    Stitch two chunks that share a sliding-window overlap.
+def _looks_like_doc_start(text: str) -> bool:
+    """True when chunk likely begins a document (not a mid-window cut)."""
+    if not text:
+        return False
+    ch = text[0]
+    if ch.islower():
+        return False
+    if ch.isupper():
+        return True
+    if ch in "'\"“‘" and len(text) > 1 and text[1].isupper():
+        return True
+    return False
 
-    Child chunks often cut mid-word, e.g. left ends with ``...poor person of…``
-    and right starts with ``erson of…``.
+
+def _overlap_join(left: str, right: str, *, min_overlap: int = 24) -> str | None:
+    """
+    Join ``right`` onto ``left`` when they share a sliding-window overlap.
+
+    Returns None when no reliable overlap is found (caller may try other orders).
     """
     if not left:
         return right
@@ -38,30 +51,82 @@ def _append_with_overlap(left: str, right: str, *, min_overlap: int = 40) -> str
     if left in right:
         return right
 
-    max_check = min(len(left), len(right), 4000)
+    max_check = min(len(left), len(right), 8000)
 
-    # Exact suffix/prefix overlap.
     for size in range(max_check, min_overlap - 1, -1):
         if left[-size:] == right[:size]:
             return left + right[size:]
 
-    # Mid-word / soft overlap: longest prefix of ``right`` found in the tail of ``left``.
+    # Mid-word cut: left "...poor person of…", right "erson of…".
     tail = left[-max_check:]
-    best_idx = -1
-    best_size = 0
-    # Cap prefix search; still long enough for reliable overlaps.
     for size in range(min(len(right), max_check), min_overlap - 1, -1):
         prefix = right[:size]
         idx = tail.rfind(prefix)
         if idx >= 0:
-            best_idx = idx
-            best_size = size
-            break
+            return left[: len(left) - len(tail) + idx] + right
 
-    if best_idx >= 0 and best_size >= min_overlap:
-        return left[: len(left) - len(tail) + best_idx] + right
+    return None
 
+
+def _append_with_overlap(left: str, right: str, *, min_overlap: int = 24) -> str:
+    joined = _overlap_join(left, right, min_overlap=min_overlap)
+    if joined is not None:
+        return joined
     return left + "\n\n" + right
+
+
+def stitch_chunk_texts(texts: list[str]) -> str:
+    """
+    Merge overlapping retrieval windows into one full document.
+
+    Picks a clean document-start chunk as the seed, then repeatedly extends
+    forward/backward via overlap so mid-word windows (``erson…``) never lead.
+    """
+    cleaned: list[str] = []
+    for text in texts:
+        body = (text or "").strip()
+        if body and body not in cleaned:
+            cleaned.append(body)
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+
+    def seed_score(text: str) -> tuple[int, int, int]:
+        return (
+            1 if _looks_like_doc_start(text) else 0,
+            0 if text[:1].islower() else 1,
+            len(text),
+        )
+
+    used = [False] * len(cleaned)
+    start = max(range(len(cleaned)), key=lambda i: seed_score(cleaned[i]))
+    used[start] = True
+    merged = cleaned[start]
+
+    progress = True
+    while progress:
+        progress = False
+        for i, body in enumerate(cleaned):
+            if used[i]:
+                continue
+            appended = _overlap_join(merged, body)
+            if appended is not None and len(appended) > len(merged):
+                merged = appended
+                used[i] = True
+                progress = True
+                continue
+            prepended = _overlap_join(body, merged)
+            if prepended is not None and len(prepended) > len(merged):
+                merged = prepended
+                used[i] = True
+                progress = True
+
+    for i, body in enumerate(cleaned):
+        if not used[i]:
+            merged = _append_with_overlap(merged, body)
+
+    return merged.strip()
 
 
 class LibraryDocumentService:
@@ -92,7 +157,18 @@ class LibraryDocumentService:
                 detail="Library document has no readable text.",
             )
 
-        payload = points[0].payload or {}
+        # Prefer metadata from a parent / document-start chunk when present.
+        meta_point = points[0]
+        for point in points:
+            payload = point.payload or {}
+            role = str(payload.get("chunk_role") or "").lower()
+            if payload.get("is_parent") is True or role == "parent":
+                meta_point = point
+                break
+            if _looks_like_doc_start(_chunk_body(payload)):
+                meta_point = point
+
+        payload = meta_point.payload or {}
         filename = (
             payload.get("filename")
             or (payload.get("source") or {}).get("filename")
@@ -126,49 +202,64 @@ class LibraryDocumentService:
         )
 
     async def _scroll_by_document_id(self, document_id: str):
-        points, _ = await qdrant_service.client.scroll(
-            collection_name=settings.LEGAL_QDRANT_COLLECTION,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="document_id",
-                        match=MatchValue(value=document_id),
-                    )
-                ]
-            ),
-            limit=10_000,
-            with_payload=True,
-            with_vectors=False,
-        )
-        return points
+        """Scroll all points for a document (Qdrant scroll is paginated)."""
+        collected = []
+        next_offset = None
+        while True:
+            points, next_offset = await qdrant_service.client.scroll(
+                collection_name=settings.LEGAL_QDRANT_COLLECTION,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=document_id),
+                        )
+                    ]
+                ),
+                limit=256,
+                offset=next_offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            collected.extend(points or [])
+            if next_offset is None:
+                break
+        return collected
 
     async def _scroll_by_filename(self, filename: str):
-        points, _ = await qdrant_service.client.scroll(
-            collection_name=settings.LEGAL_QDRANT_COLLECTION,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="filename",
-                        match=MatchValue(value=filename),
-                    )
-                ]
-            ),
-            limit=10_000,
-            with_payload=True,
-            with_vectors=False,
-        )
-        return points
+        collected = []
+        next_offset = None
+        while True:
+            points, next_offset = await qdrant_service.client.scroll(
+                collection_name=settings.LEGAL_QDRANT_COLLECTION,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="filename",
+                            match=MatchValue(value=filename),
+                        )
+                    ]
+                ),
+                limit=256,
+                offset=next_offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            collected.extend(points or [])
+            if next_offset is None:
+                break
+        return collected
 
     @staticmethod
     def _merge_points(points) -> tuple[str, int]:
         """
-        Rebuild document text from chunks.
+        Full file = every chunk merged with overlap collapsed.
 
-        Prefer a parent chunk when it already holds the full document.
-        Otherwise stitch child chunks in order, collapsing sliding-window overlaps.
+        Parents are candidates (often already full-text). Children are always
+        overlap-stitched chunk-by-chunk, then the longest clean result wins.
         """
         children: list[tuple[int, str]] = []
-        parents: list[tuple[int, str]] = []
+        parents: list[str] = []
 
         for point in points:
             payload = point.payload or {}
@@ -179,23 +270,45 @@ class LibraryDocumentService:
             is_parent = payload.get("is_parent") is True
             role = str(payload.get("chunk_role") or "").lower()
             if is_parent or role == "parent":
-                parents.append((index, body))
+                parents.append(body)
             else:
                 children.append((index, body))
 
-        if parents:
-            longest_parent = max(parents, key=lambda item: len(item[1]))
-            longest_child_len = max((len(body) for _i, body in children), default=0)
-            # Parent usually stores the full article; children are overlapping windows.
-            if len(longest_parent[1]) >= longest_child_len:
-                return longest_parent[1], 1
+        # Stable child order by index, longest body wins per index.
+        by_index: dict[int, str] = {}
+        for index, body in children:
+            prev = by_index.get(index)
+            if prev is None or len(body) > len(prev):
+                by_index[index] = body
+        ordered_children = [by_index[i] for i in sorted(by_index)]
 
-        ordered = sorted(children or parents, key=lambda item: item[0])
-        if not ordered:
+        candidates: list[tuple[str, int]] = []
+
+        if ordered_children:
+            stitched = stitch_chunk_texts(ordered_children)
+            if stitched:
+                candidates.append((stitched, len(ordered_children)))
+
+        # Also stitch parents+children together in case parent is partial.
+        all_bodies = [*parents, *ordered_children]
+        if len(all_bodies) > 1:
+            stitched_all = stitch_chunk_texts(all_bodies)
+            if stitched_all:
+                candidates.append((stitched_all, len(all_bodies)))
+
+        for parent in parents:
+            candidates.append((parent, 1))
+
+        if not candidates:
             return "", 0
 
-        merged = ordered[0][1]
-        for _index, body in ordered[1:]:
-            merged = _append_with_overlap(merged, body)
+        def result_score(item: tuple[str, int]) -> tuple[int, int, int]:
+            text, _count = item
+            return (
+                1 if _looks_like_doc_start(text) else 0,
+                0 if text[:1].islower() else 1,
+                len(text),
+            )
 
-        return merged.strip(), len(ordered)
+        best_text, best_count = max(candidates, key=result_score)
+        return best_text.strip(), best_count
