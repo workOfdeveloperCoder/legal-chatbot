@@ -22,6 +22,48 @@ def _chunk_body(payload: dict) -> str:
     return str(raw).strip()
 
 
+def _append_with_overlap(left: str, right: str, *, min_overlap: int = 40) -> str:
+    """
+    Stitch two chunks that share a sliding-window overlap.
+
+    Child chunks often cut mid-word, e.g. left ends with ``...poor person of…``
+    and right starts with ``erson of…``.
+    """
+    if not left:
+        return right
+    if not right:
+        return left
+    if right in left:
+        return left
+    if left in right:
+        return right
+
+    max_check = min(len(left), len(right), 4000)
+
+    # Exact suffix/prefix overlap.
+    for size in range(max_check, min_overlap - 1, -1):
+        if left[-size:] == right[:size]:
+            return left + right[size:]
+
+    # Mid-word / soft overlap: longest prefix of ``right`` found in the tail of ``left``.
+    tail = left[-max_check:]
+    best_idx = -1
+    best_size = 0
+    # Cap prefix search; still long enough for reliable overlaps.
+    for size in range(min(len(right), max_check), min_overlap - 1, -1):
+        prefix = right[:size]
+        idx = tail.rfind(prefix)
+        if idx >= 0:
+            best_idx = idx
+            best_size = size
+            break
+
+    if best_idx >= 0 and best_size >= min_overlap:
+        return left[: len(left) - len(tail) + best_idx] + right
+
+    return left + "\n\n" + right
+
+
 class LibraryDocumentService:
     """Rebuild full library document text from ``legal_documents`` chunks."""
 
@@ -120,8 +162,10 @@ class LibraryDocumentService:
     @staticmethod
     def _merge_points(points) -> tuple[str, int]:
         """
-        Prefer child chunks in index order (parents often duplicate them).
-        Fall back to parent text when no children exist.
+        Rebuild document text from chunks.
+
+        Prefer a parent chunk when it already holds the full document.
+        Otherwise stitch child chunks in order, collapsing sliding-window overlaps.
         """
         children: list[tuple[int, str]] = []
         parents: list[tuple[int, str]] = []
@@ -139,13 +183,19 @@ class LibraryDocumentService:
             else:
                 children.append((index, body))
 
-        ordered = sorted(children or parents, key=lambda item: item[0])
-        parts: list[str] = []
-        for _index, body in ordered:
-            if parts and (body in parts[-1] or parts[-1] in body):
-                if len(body) > len(parts[-1]):
-                    parts[-1] = body
-                continue
-            parts.append(body)
+        if parents:
+            longest_parent = max(parents, key=lambda item: len(item[1]))
+            longest_child_len = max((len(body) for _i, body in children), default=0)
+            # Parent usually stores the full article; children are overlapping windows.
+            if len(longest_parent[1]) >= longest_child_len:
+                return longest_parent[1], 1
 
-        return "\n\n".join(parts).strip(), len(ordered)
+        ordered = sorted(children or parents, key=lambda item: item[0])
+        if not ordered:
+            return "", 0
+
+        merged = ordered[0][1]
+        for _index, body in ordered[1:]:
+            merged = _append_with_overlap(merged, body)
+
+        return merged.strip(), len(ordered)
