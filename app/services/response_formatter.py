@@ -18,6 +18,7 @@ from app.rag.evidence import (
     passages_are_near_duplicates,
 )
 from app.rag.retrieval_pipeline import build_source_reference
+from app.rag.section_ids import normalize_hyphens, section_text_needles
 from app.schemas.chat import (
     Citation,
     EvidenceHighlight,
@@ -25,6 +26,11 @@ from app.schemas.chat import (
     RetrievalMetadataResponse,
     SourceReference,
 )
+
+# Resources panel: keep near-top *documents*, then attach their evidence chunks.
+_RESOURCE_SCORE_RATIO = 0.90
+_RESOURCE_SCORE_GAP = 0.10
+_RESOURCE_MAX_DOCUMENTS = 3
 
 
 class ResponseFormatter:
@@ -92,12 +98,16 @@ class ResponseFormatter:
                 if legal_raw and not include_web
                 else raw_sources
             )
-            # Resources panel: show retrieved corpus hits (Web off), not only
-            # whatever the model happened to cite.
-            resource_sources = self._prepare_display_sources(
+            section_hint = None
+            if retrieval_metadata is not None:
+                section_hint = (retrieval_metadata.filters_applied or {}).get(
+                    "section"
+                )
+            # Resources: document-level relevance cut + optional section filter.
+            # Do not dump the full retrieval limit (weak vector neighbors).
+            resource_sources = self._select_resource_sources(
                 resource_pool,
-                sources_used=None,
-                include_all_qdrant=not include_web,
+                section_hint=section_hint,
             )
             sources = self._prepare_display_sources(
                 raw_sources,
@@ -108,6 +118,8 @@ class ResponseFormatter:
                 resource_sources,
                 include_web=include_web,
             )
+            resources = resources[:_RESOURCE_MAX_DOCUMENTS]
+            self._assign_relevance_percents(resources)
         else:
             sources = raw_sources
             resources = []
@@ -303,6 +315,82 @@ class ResponseFormatter:
         )
         return self._dedupe_sources_by_chunk_identity(filtered)
 
+    def _select_resource_sources(
+        self,
+        sources: list[SourceReference],
+        *,
+        section_hint: str | None = None,
+    ) -> list[SourceReference]:
+        """
+        Pick a short document list for the Resources panel.
+
+        - If the user asked about a section and some passages mention it, keep
+          only those (any statute — no hardcoding).
+        - Rank by best chunk score per document and drop docs far below the top.
+        - Keep all evidence chunks for the selected documents.
+        """
+        pool = [
+            source
+            for source in sources
+            if (source.source_type or "") != SourceType.WEB.value
+        ]
+        if not pool:
+            return []
+
+        if section_hint:
+            matched = [
+                source
+                for source in pool
+                if self._source_mentions_section(source, section_hint)
+            ]
+            if matched:
+                pool = matched
+
+        by_doc: dict[str, list[SourceReference]] = {}
+        order: list[str] = []
+        for source in pool:
+            key = (
+                normalize_document_id(source.document_id)
+                or source.filename
+                or source.id
+            )
+            if key not in by_doc:
+                order.append(key)
+                by_doc[key] = []
+            by_doc[key].append(source)
+
+        ranked_docs = sorted(
+            (
+                (
+                    key,
+                    max(float(item.relevance or 0.0) for item in items),
+                    items,
+                )
+                for key, items in by_doc.items()
+            ),
+            key=lambda row: row[1],
+            reverse=True,
+        )
+        top = ranked_docs[0][1]
+        threshold = (
+            0.0
+            if top <= 0
+            else max(top * _RESOURCE_SCORE_RATIO, top - _RESOURCE_SCORE_GAP)
+        )
+
+        selected: list[SourceReference] = []
+        docs_kept = 0
+        for _key, score, items in ranked_docs:
+            if score < threshold:
+                continue
+            selected.extend(
+                sorted(items, key=lambda item: item.relevance, reverse=True)
+            )
+            docs_kept += 1
+            if docs_kept >= _RESOURCE_MAX_DOCUMENTS:
+                break
+        return selected
+
     def _filter_sources_for_display(
         self,
         sources: list[SourceReference],
@@ -362,6 +450,35 @@ class ResponseFormatter:
             if float(source.relevance or 0.0) >= threshold
         ]
         return selected[:3]
+
+    @staticmethod
+    def _source_mentions_section(
+        source: SourceReference,
+        section_hint: str,
+    ) -> bool:
+        needles = section_text_needles(section_hint)
+        if not needles:
+            return False
+        blob = normalize_hyphens(
+            " ".join(
+                [
+                    source.text or "",
+                    source.excerpt or "",
+                    source.section or "",
+                    " ".join(source.sections or []),
+                    source.law_name or "",
+                    source.filename or "",
+                    source.document_name or "",
+                    source.source_reference or "",
+                ]
+            )
+        ).lower()
+        compact = blob.replace("-", "")
+        for needle in needles:
+            n = needle.lower()
+            if n in blob or n.replace("-", "") in compact:
+                return True
+        return False
 
     def _dedupe_sources_by_chunk_identity(
         self,
@@ -538,6 +655,13 @@ class ResponseFormatter:
                 resource.relevance = max(
                     item.relevance for item in resource.evidence
                 )
+        self._assign_relevance_percents(resources)
+        return resources
+
+    @staticmethod
+    def _assign_relevance_percents(
+        resources: list[ResourceReference],
+    ) -> None:
         max_rel = max((item.relevance for item in resources), default=0.0)
         for resource in resources:
             if max_rel > 0:
@@ -550,8 +674,6 @@ class ResponseFormatter:
                     )
             else:
                 resource.relevance_percent = 0
-
-        return resources
 
     @staticmethod
     def _dedupe_evidence_highlights(
