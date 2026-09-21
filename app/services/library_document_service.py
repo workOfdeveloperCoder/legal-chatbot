@@ -253,19 +253,28 @@ class LibraryDocumentService:
     @staticmethod
     def _merge_points(points) -> tuple[str, int]:
         """
-        Full file = every chunk merged with overlap collapsed.
+        Full file = every unique chunk merged with overlap collapsed.
 
-        Parents are candidates (often already full-text). Children are always
-        overlap-stitched chunk-by-chunk, then the longest clean result wins.
+        Do **not** drop children that share the same ``chunk_index`` (common on
+        some server indexes) — that previously kept only the longest window
+        and looked like “half the file”.
         """
         children: list[tuple[int, str]] = []
         parents: list[str] = []
+        seen_bodies: set[str] = set()
 
         for point in points:
             payload = point.payload or {}
             body = _chunk_body(payload)
             if not body:
                 continue
+            # Prefer chunk_id identity when present so equal indexes stay distinct.
+            chunk_id = str(payload.get("chunk_id") or "").strip()
+            dedupe_key = chunk_id or body
+            if dedupe_key in seen_bodies:
+                continue
+            seen_bodies.add(dedupe_key)
+
             index = int(payload.get("chunk_index") or 0)
             is_parent = payload.get("is_parent") is True
             role = str(payload.get("chunk_role") or "").lower()
@@ -274,13 +283,11 @@ class LibraryDocumentService:
             else:
                 children.append((index, body))
 
-        # Stable child order by index, longest body wins per index.
-        by_index: dict[int, str] = {}
-        for index, body in children:
-            prev = by_index.get(index)
-            if prev is None or len(body) > len(prev):
-                by_index[index] = body
-        ordered_children = [by_index[i] for i in sorted(by_index)]
+        # Keep every child; sort by index then by length (stable coverage order).
+        ordered_children = [
+            body
+            for _index, body in sorted(children, key=lambda item: (item[0], -len(item[1])))
+        ]
 
         candidates: list[tuple[str, int]] = []
 
@@ -289,7 +296,6 @@ class LibraryDocumentService:
             if stitched:
                 candidates.append((stitched, len(ordered_children)))
 
-        # Also stitch parents+children together in case parent is partial.
         all_bodies = [*parents, *ordered_children]
         if len(all_bodies) > 1:
             stitched_all = stitch_chunk_texts(all_bodies)
@@ -304,6 +310,7 @@ class LibraryDocumentService:
 
         def result_score(item: tuple[str, int]) -> tuple[int, int, int]:
             text, _count = item
+            # Longest clean-start reconstruction wins (never prefer a short parent).
             return (
                 1 if _looks_like_doc_start(text) else 0,
                 0 if text[:1].islower() else 1,
@@ -311,4 +318,11 @@ class LibraryDocumentService:
             )
 
         best_text, best_count = max(candidates, key=result_score)
+        logger.info(
+            "library_document_merge points=%s children=%s parents=%s chars=%s",
+            len(points),
+            len(ordered_children),
+            len(parents),
+            len(best_text),
+        )
         return best_text.strip(), best_count

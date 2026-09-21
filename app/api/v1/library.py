@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import Response
 
 from app.api.dependencies.auth import get_current_active_user
 from app.models.user import User
@@ -19,6 +20,7 @@ router = APIRouter(
 )
 async def get_library_document(
     document_id: str,
+    response: Response,
     current_user: User = Depends(get_current_active_user),
 ):
     """
@@ -28,5 +30,7 @@ async def get_library_document(
     chat Resources cards.
     """
     del current_user  # auth required; corpus is shared read-only
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     service = LibraryDocumentService()
     return await service.get_document(document_id=document_id)
