@@ -319,7 +319,7 @@ class TestAssessEvidenceStrengthBackwardCompat:
 
 
 class TestAnswerGuardConflicts:
-    def test_conflict_notice_added(self):
+    def test_conflict_flagged_without_hardcoded_preamble(self):
         guard = AnswerGuard()
         result = guard.process(
             answer="Section 54-C restricts discretion.",
@@ -328,4 +328,5 @@ class TestAnswerGuardConflicts:
             evidence_strength=EvidenceStrength.PARTIAL,
             has_conflicts=True,
         )
-        assert "conflicting" in result.answer.lower()
+        assert result.answer == "Section 54-C restricts discretion."
+        assert result.grounding.has_conflicts is True

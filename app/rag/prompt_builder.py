@@ -562,16 +562,12 @@ You MAY still answer if the question is about Pakistani law, procedure,
 legal concepts, or the user's case — using general Pakistani legal
 knowledge.
 
-Mandatory first paragraph (exact meaning, you may rephrase lightly):
-"No matching document or corpus passage was found for this question. The
-following is general legal guidance only — not grounded in retrieved
-authorities or uploaded files — and should be verified by counsel against
-primary sources before reliance."
-
-Then give a clear, practical legal answer. Do not invent case citations,
-PLD/SCMR citations, or exact quotation marks from statutes you cannot
-verify. Prefer general doctrine, named statutes when commonly known, and
-qualify uncertain points. Do not refuse solely because evidence is empty.
+Answer directly and clearly. Do NOT open with a canned disclaimer such as
+"No matching document or corpus passage was found". Do not invent case
+citations, PLD/SCMR citations, or exact quotation marks from statutes you
+cannot verify. Prefer general doctrine, named statutes when commonly known,
+and qualify uncertain points in your own words. Do not refuse solely because
+evidence is empty.
 """
 
         grouped: dict[str, list[tuple[int, RetrievedChunk]]] = {

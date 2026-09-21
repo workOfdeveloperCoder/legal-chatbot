@@ -847,9 +847,6 @@ class AnswerGuard:
                 has_conflicts=has_conflicts,
             )
 
-        if has_conflicts or grounding.has_conflicts:
-            final_answer = self._apply_conflict_notice(final_answer)
-
         grounding_status = grounding.status
 
         if document_evidence_mode:
@@ -861,44 +858,22 @@ class AnswerGuard:
         ):
             grounding_status = GroundingStatus.PARTIAL
 
-        if document_evidence_mode:
-            # Only warn when an explicit long quotation could not be verified.
-            quote_mismatches = [
-                claim
-                for claim in grounding.unsupported_claims
-                if _QUOTED_TEXT_PATTERN.search(f'"{claim}"')
-                or _QUOTED_TEXT_PATTERN.search(claim)
-                or (
-                    len(claim) >= 40
-                    and claim.strip().startswith(('"', "'", "“", "‘"))
-                )
-            ]
-            if quote_mismatches:
-                final_answer = self._apply_document_quote_warning(
-                    final_answer,
-                    quote_mismatches,
-                )
-        elif grounding_status == GroundingStatus.INSUFFICIENT:
-            final_answer = self._apply_insufficient_grounding(final_answer)
-        elif evidence_strength == EvidenceStrength.NONE and not chunks:
-            if not final_answer.lstrip().lower().startswith("no matching document"):
-                final_answer = NO_DOCUMENT_FOUND_PREFIX + final_answer
-        elif grounding_status == GroundingStatus.PARTIAL:
+        # Do not prepend hardcoded disclaimer templates onto the model answer.
+        # Surface grounding via grounding_status / evidence_strength metadata only.
+        # Still scrub clearly invented short case citations when unsupported.
+        if (
+            not document_evidence_mode
+            and grounding_status
+            in {GroundingStatus.PARTIAL, GroundingStatus.INSUFFICIENT}
+            and grounding.unsupported_claims
+        ):
             final_answer = self._strip_invented_authorities(
                 final_answer,
                 grounding.unsupported_claims,
             )
-            final_answer = self._apply_partial_grounding(
-                final_answer,
-                grounding.unsupported_claims,
-                grounding.partial_claims,
-            )
-        elif evidence_strength == EvidenceStrength.WEAK:
-            if not final_answer.startswith(WEAK_EVIDENCE_PREFIX):
-                final_answer = WEAK_EVIDENCE_PREFIX + final_answer
-        elif evidence_strength == EvidenceStrength.PARTIAL:
-            if not final_answer.startswith(PARTIAL_EVIDENCE_PREFIX):
-                final_answer = PARTIAL_EVIDENCE_PREFIX + final_answer
+
+        if has_conflicts or grounding.has_conflicts:
+            grounding.has_conflicts = True
 
         sources_used = sorted(set(validation.valid))
 

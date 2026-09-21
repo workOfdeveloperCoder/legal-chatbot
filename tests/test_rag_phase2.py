@@ -206,7 +206,8 @@ class TestAnswerGuard:
         answer = guard.build_insufficient_evidence_answer(
             evidence_strength=EvidenceStrength.NONE,
         )
-        assert "sufficient authoritative" in answer.lower()
+        assert "sufficient" in answer.lower()
+        assert "legal" in answer.lower()
 
     def test_invalid_citations_repaired_before_response(self):
         guard = AnswerGuard()
@@ -221,7 +222,7 @@ class TestAnswerGuard:
         assert "[Source 99]" not in result.answer
         assert result.citation_validation.status.value == "repaired"
 
-    def test_weak_evidence_adds_qualification(self):
+    def test_weak_evidence_keeps_llm_answer(self):
         guard = AnswerGuard()
         result = guard.process(
             answer="The contract permits termination.",
@@ -229,7 +230,8 @@ class TestAnswerGuard:
             sources=[_source(1, source_type=SourceType.MATTER.value)],
             evidence_strength=EvidenceStrength.WEAK,
         )
-        assert "limited" in result.answer.lower() or "Note:" in result.answer
+        assert result.answer == "The contract permits termination."
+        assert result.grounding_status is not None
 
 
 class TestFollowUpContext:
