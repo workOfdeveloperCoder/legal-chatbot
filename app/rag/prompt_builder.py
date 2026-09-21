@@ -415,23 +415,26 @@ Do not fabricate translations of legal terminology.
 
         if assessment.has_conflicts:
             lines.append(
-                "CONFLICT WARNING: Retrieved authorities may contain conflicting "
-                "positions. Identify the conflict rather than merging into one rule."
+                "CONFLICT WARNING: Authorities may disagree. Discuss both "
+                "positions briefly in your own words. Do NOT open with a canned "
+                "disclaimer about conflicting positions or provisional guidance."
             )
 
         if assessment.overall_strength == EvidenceStrength.NONE:
             lines.append(
-                "Do not provide a confident legal answer. State that available "
-                "sources are insufficient."
+                "Qualify confidence where sources are thin, but still answer "
+                "from available material. Do NOT open with "
+                "'No matching document or corpus passage…'."
             )
         elif assessment.overall_strength == EvidenceStrength.WEAK:
             lines.append(
-                "Qualify the response heavily. Do not present private documents "
-                "as authoritative law."
+                "Qualify the response. Do not present private documents "
+                "as authoritative law. Do NOT use canned disclaimer openings."
             )
         elif assessment.overall_strength == EvidenceStrength.PARTIAL:
             lines.append(
-                "Qualify conclusions where evidence is incomplete."
+                "Qualify conclusions where evidence is incomplete. "
+                "Do NOT use canned disclaimer openings."
             )
 
         return "\n".join(lines)

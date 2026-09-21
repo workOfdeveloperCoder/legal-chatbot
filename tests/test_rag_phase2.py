@@ -233,6 +233,33 @@ class TestAnswerGuard:
         assert result.answer == "The contract permits termination."
         assert result.grounding_status is not None
 
+    def test_strips_canned_preambles_when_sources_matched(self):
+        from app.rag.answer_guard import strip_canned_guard_preambles
+
+        raw = (
+            "No matching document or corpus passage fully supports every "
+            "legal proposition below. Treat this as provisional guidance "
+            "and verify against primary authorities before reliance.\n\n"
+            "Note: Retrieved authorities may reflect conflicting positions. "
+            "The analysis below identifies uncertainty where present.\n\n"
+            "According to legal commentary, Section 54-C refers to injunctions."
+        )
+        cleaned = strip_canned_guard_preambles(raw)
+        assert cleaned.startswith("According to legal commentary")
+        assert "provisional guidance" not in cleaned.lower()
+        assert "conflicting positions" not in cleaned.lower()
+
+        guard = AnswerGuard()
+        result = guard.process(
+            answer=raw,
+            chunks=[_chunk()],
+            sources=[_source(1)],
+            evidence_strength=EvidenceStrength.PARTIAL,
+            has_conflicts=True,
+        )
+        assert result.answer.startswith("According to legal commentary")
+        assert "No matching document" not in result.answer
+
 
 class TestFollowUpContext:
     @pytest.mark.asyncio

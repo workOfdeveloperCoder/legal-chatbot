@@ -91,6 +91,74 @@ WEAK_EVIDENCE_PREFIX = (
     "documents only and should not be treated as definitive legal authority.\n\n"
 )
 
+# Exact canned blocks previously prepended by AnswerGuard / prompted into
+# model output. Strip these whenever retrieved sources exist.
+_CANNED_ANSWER_PREFIXES: tuple[str, ...] = (
+    (
+        "No matching document or corpus passage fully supports every "
+        "legal proposition below. Treat this as provisional guidance "
+        "and verify against primary authorities before reliance.\n\n"
+    ),
+    (
+        "Note: Retrieved authorities may reflect conflicting positions. "
+        "The analysis below identifies uncertainty where present.\n\n"
+    ),
+    NO_DOCUMENT_FOUND_PREFIX,
+    PARTIAL_EVIDENCE_PREFIX,
+    WEAK_EVIDENCE_PREFIX,
+    (
+        "Note: Some quoted passages could not be matched exactly to "
+        "the retrieved document text. The summary below is based on "
+        "available excerpts.\n\n"
+    ),
+    (
+        "Note: Some legal propositions in this answer could not be fully "
+        "verified against retrieved evidence"
+    ),
+)
+
+
+def strip_canned_guard_preambles(answer: str) -> str:
+    """Remove known hardcoded disclaimer blocks from the start of an answer."""
+    text = (answer or "").lstrip()
+    if not text:
+        return answer or ""
+
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _CANNED_ANSWER_PREFIXES:
+            # Partial-evidence note includes a dynamic claim list before \n\n.
+            if prefix.endswith("verified against retrieved evidence"):
+                lower = text.lower()
+                needle = prefix.lower()
+                if lower.startswith(needle):
+                    rest = text[len(prefix) :]
+                    # Drop through the rest of that sentence/paragraph.
+                    cut = rest.find("\n\n")
+                    text = rest[cut + 2 :].lstrip() if cut >= 0 else rest.lstrip()
+                    changed = True
+                    break
+                continue
+            if text.startswith(prefix):
+                text = text[len(prefix) :].lstrip()
+                changed = True
+                break
+            # Case-insensitive / whitespace-flex match for model paraphrases
+            # of the two worst offenders.
+            compact_text = " ".join(text.split()).lower()
+            compact_prefix = " ".join(prefix.split()).lower().rstrip()
+            if compact_prefix and compact_text.startswith(compact_prefix):
+                # Remove approximate length from original by finding first
+                # double newline after the prefix region.
+                cut = text.find("\n\n")
+                if cut >= 0 and cut < max(80, len(prefix) + 40):
+                    text = text[cut + 2 :].lstrip()
+                    changed = True
+                    break
+
+    return text
+
 _CITATION_PATTERN = re.compile(
     r"\[Source\s+(\d+)\]",
     re.IGNORECASE,
@@ -874,6 +942,10 @@ class AnswerGuard:
 
         if has_conflicts or grounding.has_conflicts:
             grounding.has_conflicts = True
+
+        # Always drop canned guard disclaimers from the user-facing answer.
+        # When sources/chunks matched, never leave "No matching document…" text.
+        final_answer = strip_canned_guard_preambles(final_answer)
 
         sources_used = sorted(set(validation.valid))
 

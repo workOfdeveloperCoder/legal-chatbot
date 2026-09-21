@@ -1004,6 +1004,12 @@ class RAGService:
         )
 
         final_answer = guarded.answer
+        # Belt-and-suspenders: never leave canned "no matching document" text
+        # when retrieval actually returned sources/resources.
+        if preliminary.get("sources") or chunks:
+            from app.rag.answer_guard import strip_canned_guard_preambles
+
+            final_answer = strip_canned_guard_preambles(final_answer)
         if (
             "qdrant_embedding_model" in retrieval_metadata.degraded_sources
             and not chunks
