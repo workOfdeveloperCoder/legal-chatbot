@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from app.rag.context_resolver import ContextResolver
 from app.rag.models import Message
+from app.rag.section_ids import normalize_section_id
 from app.services.query_router import Task
 
 
@@ -50,25 +51,9 @@ class QueryRewriter(BaseQueryRewriter):
         "cp": "Constitution Petition",
     }
 
-    # Bare section cites that usually imply a specific Pakistani statute.
-    SECTION_EXPANSIONS = (
-        (
-            re.compile(r"\b(?:section|sec\.?|u/s)\s*54[\s\-]?c\b", re.I),
-            "Electricity Act 1910 section 54-C theft of electricity",
-        ),
-        (
-            re.compile(r"\b54c\b", re.I),
-            "Electricity Act 1910 section 54-C theft of electricity",
-        ),
-        (
-            re.compile(r"\b(?:section|sec\.?|u/s)\s*144\b", re.I),
-            "Code of Criminal Procedure section 144",
-        ),
-        (
-            re.compile(r"\b(?:section|sec\.?|u/s)\s*491\b", re.I),
-            "Code of Criminal Procedure section 491 habeas corpus",
-        ),
-    )
+    # Intentionally empty: do not hard-map bare section numbers to a statute.
+    # Corpus hits must come from embeddings + metadata the user already indexed.
+    SECTION_EXPANSIONS: tuple[tuple[re.Pattern[str], str], ...] = ()
 
     COURTS = [
         "supreme court",
@@ -109,10 +94,13 @@ class QueryRewriter(BaseQueryRewriter):
         )
         used_context = resolved.strip().lower() != original.strip().lower()
 
+        # Filters from the user's resolved question only — never from rewrite
+        # enrichment text (years/statute names must not become hard Qdrant filters).
+        filters = self._extract_filters(resolved)
+
         query = self._expand_abbreviations(resolved)
         query = self._expand_section_aliases(query)
         query = self._enrich_multilingual_legal_terms(query)
-        filters = self._extract_filters(query)
         legal_terms = self._extract_legal_terms(query)
         query = self._append_keywords(query=query, task=task)
 
@@ -199,15 +187,21 @@ class QueryRewriter(BaseQueryRewriter):
                 break
 
         section = re.search(
-            r"(section|sec|u/s|dafaa?)\s+([0-9A-Za-z\-]+)",
+            r"(section|sec\.?|u/s|dafaa?)\s*([0-9A-Za-z\-]+)",
             lower_query,
         )
         if section:
-            filters["section"] = section.group(2)
+            filters["section"] = normalize_section_id(section.group(2))
         else:
             arabic_section = re.search(r"دفعہ\s*([0-9A-Za-z\-]+)", query)
             if arabic_section:
-                filters["section"] = arabic_section.group(1)
+                filters["section"] = normalize_section_id(
+                    arabic_section.group(1)
+                )
+            else:
+                bare = re.search(r"\b(\d{1,4}[\s\-]?[a-z])\b", lower_query)
+                if bare and re.search(r"\bsection\b|\bsec\.?\b|\bu/s\b", lower_query):
+                    filters["section"] = normalize_section_id(bare.group(1))
 
         return filters
 

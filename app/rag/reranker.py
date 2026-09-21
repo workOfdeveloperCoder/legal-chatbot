@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import re
 from abc import ABC, abstractmethod
 
 from app.rag.models import RetrievedChunk, SourceType
+from app.rag.section_ids import normalize_hyphens, tokenize_for_rerank
 
 
 class BaseReranker(ABC):
@@ -65,7 +65,7 @@ class HybridReranker(BaseReranker):
         if not chunks:
             return []
 
-        query_terms = _tokenize(query)
+        query_terms = tokenize_for_rerank(query)
         tier_boosts = (
             self.DOCUMENT_TASK_TIER_BOOST
             if document_task
@@ -99,18 +99,38 @@ def _score_chunk(
     tier_boosts: dict[str, float],
 ) -> float:
     base = float(chunk.score or 0.0)
-    text = (chunk.text or "").lower()
+    text = normalize_hyphens(chunk.text or "").lower()
+    meta_blob = " ".join(
+        [
+            text,
+            " ".join(chunk.keywords or []),
+            " ".join(chunk.sections or []),
+            chunk.law_name or "",
+            chunk.title or "",
+            chunk.heading or "",
+            chunk.summary or "",
+        ]
+    ).lower()
+    meta_blob = normalize_hyphens(meta_blob)
 
-    text_terms = _tokenize(text)
+    text_terms = tokenize_for_rerank(meta_blob)
     overlap = len(query_terms & text_terms)
     keyword_boost = min(overlap * 0.03, 0.18)
 
     section_boost = 0.0
     section_filter = filters.get("section")
     if section_filter:
-        section_filter = section_filter.lower()
-        chunk_sections = [s.lower() for s in (chunk.sections or [])]
-        if section_filter in chunk_sections or section_filter in text:
+        section_filter = normalize_hyphens(section_filter).lower()
+        compact = section_filter.replace("-", "")
+        chunk_sections = [
+            normalize_hyphens(s).lower() for s in (chunk.sections or [])
+        ]
+        if (
+            section_filter in chunk_sections
+            or compact in {normalize_hyphens(s).lower().replace("-", "") for s in (chunk.sections or [])}
+            or section_filter in meta_blob
+            or compact in meta_blob.replace("-", "")
+        ):
             section_boost = 0.15
 
     court_boost = 0.0
@@ -127,13 +147,13 @@ def _score_chunk(
 
     exact_phrase_boost = 0.0
     for term in query_terms:
-        if len(term) >= 5 and term in text:
+        if len(term) >= 5 and term in meta_blob:
             exact_phrase_boost = 0.05
             break
 
     named_entity_boost = 0.0
     for entity in _named_entities(chunk, query_terms):
-        if entity in text:
+        if entity in meta_blob:
             named_entity_boost = max(named_entity_boost, 0.14)
 
     source_type = chunk.source_type or SourceType.LEGAL.value
@@ -202,8 +222,5 @@ def _named_entities(
 
 
 def _tokenize(text: str) -> set[str]:
-    return {
-        token
-        for token in re.findall(r"[a-z0-9]+", text.lower())
-        if len(token) >= 3
-    }
+    """Backward-compatible alias used by older tests. """
+    return tokenize_for_rerank(text)

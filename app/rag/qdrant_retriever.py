@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from qdrant_client.models import FieldCondition, Filter, MatchValue
+
 from app.core.config import settings
 from app.embeddings.service import EmbeddingService
 
@@ -15,6 +17,7 @@ from app.rag.models import (
 )
 from app.rag.repository import BaseRetriever
 from app.rag.retrieval_pipeline import finalize_retrieval
+from app.rag.section_ids import section_keyword_variants
 
 from app.vector.qdrant import qdrant_service
 from app.vector.filters import QdrantFilterBuilder
@@ -253,14 +256,83 @@ class QdrantRetriever(BaseRetriever):
             metadata.collections_queried.append(
                 qdrant_service.legal_collection
             )
-            return self._convert_points(
+            vector_chunks = self._convert_points(
                 points.points,
                 source_type=SourceType.LEGAL.value,
             )
+            keyword_chunks = await self._keyword_section_hits(
+                filters=filters,
+                limit=limit,
+                metadata=metadata,
+            )
+            return _merge_chunks(vector_chunks, keyword_chunks)
         except Exception:
             logger.exception("Legal corpus retrieval failed")
             metadata.degraded_sources.append(SourceType.LEGAL.value)
             return []
+
+    async def _keyword_section_hits(
+        self,
+        *,
+        filters: dict[str, str] | None,
+        limit: int,
+        metadata: RetrievalMetadata,
+    ) -> list[RetrievedChunk]:
+        """
+        General lexical rescue: if the user named a section/article, also pull
+        corpus points whose ``keywords`` list already stores that cite.
+
+        No statute hardcoding — only the section id the user typed.
+        """
+        section = (filters or {}).get("section")
+        if not section or limit <= 0:
+            return []
+
+        variants = section_keyword_variants(section)
+        if not variants:
+            return []
+
+        collected: list[RetrievedChunk] = []
+        seen_ids: set[str] = set()
+        try:
+            for value in variants:
+                if len(collected) >= limit:
+                    break
+                points, _ = await self.client.scroll(
+                    collection_name=qdrant_service.legal_collection,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="keywords",
+                                match=MatchValue(value=value),
+                            )
+                        ]
+                    ),
+                    limit=min(limit, 8),
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                batch = self._convert_points(
+                    points,
+                    source_type=SourceType.LEGAL.value,
+                )
+                for chunk in batch:
+                    cid = chunk.chunk_id or chunk.id
+                    if cid in seen_ids:
+                        continue
+                    seen_ids.add(cid)
+                    # Slight boost so keyword-tagged hits survive merge/rerank
+                    chunk.score = max(float(chunk.score or 0.0), 0.72)
+                    collected.append(chunk)
+                    if len(collected) >= limit:
+                        break
+            if collected and qdrant_service.legal_collection not in metadata.collections_queried:
+                metadata.collections_queried.append(
+                    qdrant_service.legal_collection
+                )
+        except Exception:
+            logger.exception("Keyword section rescue failed section=%s", section)
+        return collected
 
     async def _search_private_tiers(
         self,
@@ -405,7 +477,7 @@ class QdrantRetriever(BaseRetriever):
             chunks.append(
                 RetrievedChunk(
                     id=chunk_id,
-                    score=float(point.score),
+                    score=float(getattr(point, "score", None) or 0.0),
                     text=payload.get(
                         "text",
                         payload.get("chunk_text", ""),
@@ -461,3 +533,17 @@ class QdrantRetriever(BaseRetriever):
             )
 
         return chunks
+
+
+def _merge_chunks(
+    primary: list[RetrievedChunk],
+    extra: list[RetrievedChunk],
+) -> list[RetrievedChunk]:
+    """Dedupe by chunk id; keep the higher vector/keyword score."""
+    by_id: dict[str, RetrievedChunk] = {}
+    for chunk in [*primary, *extra]:
+        key = str(chunk.chunk_id or chunk.id)
+        existing = by_id.get(key)
+        if existing is None or float(chunk.score or 0) > float(existing.score or 0):
+            by_id[key] = chunk
+    return list(by_id.values())

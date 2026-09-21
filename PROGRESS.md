@@ -1,38 +1,36 @@
 # Project Progress Log
 
 ## Last Updated
-Monday, Aug 31, 2026 — ~9:50 PM (UTC+5)
+Tuesday, Sep 22, 2026 — ~12:46 AM (UTC+5)
 
 ## Current State
-- Chat LLM: **OpenRouter** `minimax/minimax-m2.7:free`
-- Qdrant search: **Hugging Face fastembed** `nomic-ai/nomic-embed-text-v1.5` (768-d, matches `legal_documents`)
-- Web search: only when UI Web toggle is on (`payload.web_search`)
-- `.env` switched away from OpenRouter Nemotron embed (2048-d — incompatible with Qdrant index)
+- Chat LLM: **Gemini** `gemini-3.6-flash` (live E2E PASS)
+- Backend: `http://127.0.0.1:8001` (uvicorn --reload)
+- Frontend: `http://127.0.0.1:5173` (Vite); `API_PROXY_TARGET=http://127.0.0.1:8001`
+- Qdrant: local Docker on `:6333` (collections present)
+- `:8000` still occupied by unrelated **Site Chatbot / dental-chatbot-v2** — do not bind LegalGPT there
+- Voice: STT faster-whisper + TTS piper ready; speak E2E PASS
 
 ## What Was Done This Session
-- Diagnosed missing library Resources: `EMBEDDING_MODEL=nvidia/nemotron-3-embed-1b:free` → `qdrant_embedding_compatible=False` → retriever returns zero legal chunks
-- Restored `.env` to `EMBEDDING_PROVIDER=huggingface` + nomic v1.5 + HF token; set `EMBEDDING_ONLINE_ONLY=false`
-- Verified end-to-end: 768-d embed → 3 Qdrant hits for "section 417 PPC"
-- Hardened `response_formatter.py`: strip `source_type=web` from sources/resources when `include_web=False`
-- Added chat request log: `web_search` + `quick_action` for debugging UI toggle issues
+- Switched chat to Gemini; verified live generation
+- Started Docker Desktop + existing `qdrant` container
+- Pointed legal-ai-ui proxy to local `:8001`
+- Started UI + backend; E2E via Vite proxy: login → chat/stream → speak
+- Login user `yasir@example.com` succeeded
+- Report: `tmp_test/gemini_ui_e2e_report.json`
 
 ## In Progress / Half Done
-- API on `:8000` may be a **different app** (404 on `/api/v1/health/ready`); legal-chatbot needs restart on correct port
-- Remote server (`172.16.112.17:8000`?) may still run old code + old `.env`
+- Chat answered Section 54-C but noted no corpus hit (general guidance path) — embeddings/Qdrant retrieval may need a follow-up query check
 
 ## Next Steps (Do This First When You Return)
-1. **Restart legal-chatbot** so it loads the new `.env` (huggingface nomic, not OpenRouter embed)
-2. Confirm `/ready` shows `"embedding_provider": "huggingface"`, `"qdrant_embedding_compatible": true` (via stack.search.model contains nomic)
-3. Retry a legal query with **Web toggle OFF** — Resources should show `legal` corpus docs, no `web` badge
-4. If UI still shows web junk, check API logs for `Chat request web_search=True` (UI may be sending toggle on)
-5. For strict no-download server: use remote Ollama sidecar or Fireworks nomic API instead of fastembed
+1. Open UI at http://127.0.0.1:5173 and chat as yasir@example.com
+2. If legal Resources are empty, diagnose Ollama nomic embed → Qdrant `legal_documents` hits
+3. Keep LegalGPT on **8001**; leave Site Chatbot on **8000**
 
 ## Known Issues / Blockers
-- OpenRouter free embed models are **not nomic 768-d** — cannot search existing Qdrant without full re-index
-- fastembed downloads ~300MB once on first embed (not ideal for zero-download production)
-- Port 8000 currently occupied by another service
+- Docker Desktop must be running for local Qdrant
+- Leaving `API_PROXY_TARGET` on a dead LAN host breaks the UI proxy
 
 ## Key Decisions & Context
-- UI Web toggle is the single source of truth for internet search
-- Qdrant `legal_documents` index is 768-d nomic — embedding model name must contain "nomic"
-- Chat (OpenRouter) and search (nomic embed) are intentionally separate providers
+- Local stack: UI `:5173` → proxy → LegalGPT `:8001` → Gemini + Ollama embed + Qdrant `:6333`
+- Speak is local (Piper/espeak), independent of Gemini

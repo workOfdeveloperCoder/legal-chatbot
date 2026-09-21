@@ -199,12 +199,14 @@ def test_card_opening_replies_cover_clarifying_actions():
 
 
 @pytest.mark.asyncio
-async def test_section_54c_rewrite_adds_electricity_act():
+async def test_section_rewrite_does_not_hardcode_statute():
     from app.rag.query_rewriter import QueryRewriter
 
     result = await QueryRewriter().rewrite(question="what is section 54-c")
-    assert "Electricity Act" in result.rewritten_query
-    assert "54-C" in result.rewritten_query or "54-c" in result.rewritten_query.lower()
+    # Bare section queries must not invent a statute name.
+    assert "Electricity Act" not in result.rewritten_query
+    assert result.filters.get("section") in {"54-c", "54c"}
+    assert "year" not in result.filters
 
 
 

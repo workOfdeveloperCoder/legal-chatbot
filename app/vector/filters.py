@@ -525,14 +525,9 @@ class QdrantFilterBuilder:
                 )
             )
 
-        section = filters.get("section")
-        if section:
-            must.append(
-                FieldCondition(
-                    key="sections",
-                    match=MatchValue(value=section),
-                )
-            )
+        # Do NOT hard-filter on ``sections``. Indexed metadata is often missing
+        # or formatted differently than the rewriter's normalized id, which would
+        # wipe legal hits for every chat model. Section hints are for rerank only.
 
         if not must:
             return None
