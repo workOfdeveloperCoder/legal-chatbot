@@ -645,7 +645,9 @@ class ResponseFormatter:
         resources.sort(key=lambda item: item.relevance, reverse=True)
         resources = self._dedupe_resources(resources)
         for resource in resources:
-            resource.evidence = self._dedupe_evidence_highlights(resource.evidence)
+            resource.evidence = self._collapse_evidence_to_one(
+                self._dedupe_evidence_highlights(resource.evidence)
+            )
             resource.source_ids = [item.source_id for item in resource.evidence]
             resource.source_numbers = [
                 item.source_number for item in resource.evidence
@@ -674,6 +676,45 @@ class ResponseFormatter:
                     )
             else:
                 resource.relevance_percent = 0
+
+    @staticmethod
+    def _collapse_evidence_to_one(
+        evidence: list[EvidenceHighlight],
+    ) -> list[EvidenceHighlight]:
+        """One resource → one evidence blob (no Passage 1 / 2)."""
+        if len(evidence) <= 1:
+            return evidence
+
+        ranked = sorted(evidence, key=lambda item: item.relevance, reverse=True)
+        primary = ranked[0]
+
+        parts: list[str] = []
+        for item in ranked:
+            text = (item.excerpt or item.text or "").strip()
+            if not text:
+                continue
+            if any(
+                passages_are_near_duplicates(text, existing)
+                or text in existing
+                or existing in text
+                for existing in parts
+            ):
+                # Keep the longer version when one contains the other.
+                for idx, existing in enumerate(parts):
+                    if text in existing or existing in text or passages_are_near_duplicates(
+                        text, existing
+                    ):
+                        if len(text) > len(existing):
+                            parts[idx] = text
+                        break
+                continue
+            parts.append(text)
+
+        combined = "\n\n".join(parts).strip() if parts else (primary.excerpt or primary.text)
+        primary.excerpt = combined
+        if primary.text:
+            primary.text = combined
+        return [primary]
 
     @staticmethod
     def _dedupe_evidence_highlights(
